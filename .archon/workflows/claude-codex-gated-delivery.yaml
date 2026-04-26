@@ -25,8 +25,9 @@ interactive: true
 # effort: high enables extended thinking on all Claude author nodes.
 effort: high
 
-# modelReasoningEffort: high enables deep reasoning on all Codex reviewer nodes.
-modelReasoningEffort: high
+# Codex reviewer reasoning effort is NOT set here — it is controlled via
+# assistants.codex.modelReasoningEffort in .archon/config.yaml (default: medium).
+# Valid values: none | low | medium | high | xhigh
 
 # Worktree pinned ON: each run gets an isolated git checkout so the Codex
 # git-diff guard has stable HEAD references.
