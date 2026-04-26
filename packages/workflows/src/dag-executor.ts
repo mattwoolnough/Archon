@@ -149,6 +149,10 @@ interface WorkflowLevelOptions {
   fallbackModel?: string;
   betas?: string[];
   sandbox?: SandboxSettings;
+  // Codex-specific workflow-level config (merged into assistantConfig when provider is codex)
+  modelReasoningEffort?: string;
+  webSearchMode?: string;
+  additionalDirectories?: string[];
 }
 
 /** Internal node execution result — extends NodeOutput with cost data for aggregation. */
@@ -451,8 +455,24 @@ async function resolveNodeProviderAndModel(
     fallbackModel: fb,
   };
 
-  // Pass assistantConfig from config — provider parses internally
-  const assistantConfig = config.assistants[provider] ?? {};
+  // Pass assistantConfig from config — provider parses internally.
+  // For codex nodes, merge workflow-level Codex settings (workflow overrides assistant config).
+  let assistantConfig = config.assistants[provider] ?? {};
+  if (provider === 'codex') {
+    const workflowCodexConfig: Record<string, unknown> = {};
+    if (workflowLevelOptions.modelReasoningEffort !== undefined) {
+      workflowCodexConfig.modelReasoningEffort = workflowLevelOptions.modelReasoningEffort;
+    }
+    if (workflowLevelOptions.webSearchMode !== undefined) {
+      workflowCodexConfig.webSearchMode = workflowLevelOptions.webSearchMode;
+    }
+    if (workflowLevelOptions.additionalDirectories !== undefined) {
+      workflowCodexConfig.additionalDirectories = workflowLevelOptions.additionalDirectories;
+    }
+    if (Object.keys(workflowCodexConfig).length > 0) {
+      assistantConfig = { ...assistantConfig, ...workflowCodexConfig };
+    }
+  }
 
   const options: SendQueryOptions = {
     ...baseOptions,
@@ -1626,7 +1646,23 @@ function buildLoopNodeOptions(
   if (config.envVars && Object.keys(config.envVars).length > 0) {
     options.env = config.envVars;
   }
-  options.assistantConfig = config.assistants[provider] ?? {};
+  let assistantConfig = config.assistants[provider] ?? {};
+  if (provider === 'codex' && workflowLevelOptions) {
+    const workflowCodexConfig: Record<string, unknown> = {};
+    if (workflowLevelOptions.modelReasoningEffort !== undefined) {
+      workflowCodexConfig.modelReasoningEffort = workflowLevelOptions.modelReasoningEffort;
+    }
+    if (workflowLevelOptions.webSearchMode !== undefined) {
+      workflowCodexConfig.webSearchMode = workflowLevelOptions.webSearchMode;
+    }
+    if (workflowLevelOptions.additionalDirectories !== undefined) {
+      workflowCodexConfig.additionalDirectories = workflowLevelOptions.additionalDirectories;
+    }
+    if (Object.keys(workflowCodexConfig).length > 0) {
+      assistantConfig = { ...assistantConfig, ...workflowCodexConfig };
+    }
+  }
+  options.assistantConfig = assistantConfig;
   // Pass workflow-level options as nodeConfig so providers can apply them
   if (workflowLevelOptions) {
     options.nodeConfig = {
@@ -2365,6 +2401,9 @@ export async function executeDagWorkflow(
     fallbackModel: workflow.fallbackModel,
     betas: workflow.betas,
     sandbox: workflow.sandbox,
+    modelReasoningEffort: workflow.modelReasoningEffort,
+    webSearchMode: workflow.webSearchMode,
+    additionalDirectories: workflow.additionalDirectories,
   };
   const layers = buildTopologicalLayers(workflow.nodes);
   const nodeOutputs = new Map<string, NodeOutput>();

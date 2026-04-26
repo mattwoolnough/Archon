@@ -2293,4 +2293,134 @@ nodes:
       expect(mockLogger.warn).toHaveBeenCalled();
     });
   });
+
+  describe('workflow-level orchestration fields (effort, thinking, fallbackModel, betas, sandbox)', () => {
+    async function writeWorkflow(dir: string, yaml: string): Promise<void> {
+      const workflowDir = join(dir, '.archon', 'workflows');
+      await mkdir(workflowDir, { recursive: true });
+      await writeFile(join(workflowDir, 'test.yaml'), yaml);
+    }
+
+    const nodeBlock = `nodes:\n  - id: n\n    prompt: p\n`;
+
+    it('should preserve effort field when valid', async () => {
+      await writeWorkflow(testDir, `name: t\ndescription: d\neffort: high\n${nodeBlock}`);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.errors).toHaveLength(0);
+      expect(result.workflows[0].workflow.effort).toBe('high');
+    });
+
+    it('should fail load with validation_error for invalid effort value', async () => {
+      await writeWorkflow(testDir, `name: t\ndescription: d\neffort: extreme\n${nodeBlock}`);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.workflows).toHaveLength(0);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].errorType).toBe('validation_error');
+      expect(result.errors[0].error).toContain('effort');
+    });
+
+    it('should preserve thinking field when valid (budgetTokens number)', async () => {
+      await writeWorkflow(
+        testDir,
+        `name: t\ndescription: d\nthinking:\n  type: enabled\n  budgetTokens: 1024\n${nodeBlock}`
+      );
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.errors).toHaveLength(0);
+      const thinking = result.workflows[0].workflow.thinking;
+      expect(thinking).toBeDefined();
+      expect(typeof thinking === 'object' && thinking !== null && 'type' in thinking).toBe(true);
+    });
+
+    it('should fail load with validation_error for invalid thinking value', async () => {
+      await writeWorkflow(testDir, `name: t\ndescription: d\nthinking: not-valid\n${nodeBlock}`);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.workflows).toHaveLength(0);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].errorType).toBe('validation_error');
+      expect(result.errors[0].error).toContain('thinking');
+    });
+
+    it('should preserve fallbackModel when valid', async () => {
+      await writeWorkflow(
+        testDir,
+        `name: t\ndescription: d\nfallbackModel: claude-haiku-4-5\n${nodeBlock}`
+      );
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.errors).toHaveLength(0);
+      expect(result.workflows[0].workflow.fallbackModel).toBe('claude-haiku-4-5');
+    });
+
+    it('should fail load with validation_error for invalid fallbackModel (empty string)', async () => {
+      await writeWorkflow(testDir, `name: t\ndescription: d\nfallbackModel: ""\n${nodeBlock}`);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.workflows).toHaveLength(0);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].errorType).toBe('validation_error');
+      expect(result.errors[0].error).toContain('fallbackModel');
+    });
+
+    it('should preserve betas when valid', async () => {
+      await writeWorkflow(
+        testDir,
+        `name: t\ndescription: d\nbetas:\n  - interleaved-thinking-2025-05-14\n${nodeBlock}`
+      );
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.errors).toHaveLength(0);
+      expect(result.workflows[0].workflow.betas).toEqual(['interleaved-thinking-2025-05-14']);
+    });
+
+    it('should fail load with validation_error for invalid betas (empty array)', async () => {
+      await writeWorkflow(testDir, `name: t\ndescription: d\nbetas: []\n${nodeBlock}`);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.workflows).toHaveLength(0);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].errorType).toBe('validation_error');
+      expect(result.errors[0].error).toContain('betas');
+    });
+
+    it('should preserve sandbox when valid', async () => {
+      await writeWorkflow(
+        testDir,
+        `name: t\ndescription: d\nsandbox:\n  enabled: true\n${nodeBlock}`
+      );
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.errors).toHaveLength(0);
+      expect(result.workflows[0].workflow.sandbox).toEqual({ enabled: true });
+    });
+
+    it('should fail load with validation_error for invalid sandbox value (non-object)', async () => {
+      await writeWorkflow(testDir, `name: t\ndescription: d\nsandbox: not-an-object\n${nodeBlock}`);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.workflows).toHaveLength(0);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].errorType).toBe('validation_error');
+      expect(result.errors[0].error).toContain('sandbox');
+    });
+
+    it('should preserve all five fields together', async () => {
+      await writeWorkflow(
+        testDir,
+        `name: t\ndescription: d\neffort: high\nfallbackModel: haiku\nbetas:\n  - beta-x\nsandbox:\n  enabled: true\n${nodeBlock}`
+      );
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.errors).toHaveLength(0);
+      const wf = result.workflows[0].workflow;
+      expect(wf.effort).toBe('high');
+      expect(wf.fallbackModel).toBe('haiku');
+      expect(wf.betas).toEqual(['beta-x']);
+      expect(wf.sandbox).toEqual({ enabled: true });
+    });
+
+    it('should omit all five fields when not present', async () => {
+      await writeWorkflow(testDir, `name: t\ndescription: d\n${nodeBlock}`);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.errors).toHaveLength(0);
+      const wf = result.workflows[0].workflow;
+      expect(wf.effort).toBeUndefined();
+      expect(wf.thinking).toBeUndefined();
+      expect(wf.fallbackModel).toBeUndefined();
+      expect(wf.betas).toBeUndefined();
+      expect(wf.sandbox).toBeUndefined();
+    });
+  });
 });

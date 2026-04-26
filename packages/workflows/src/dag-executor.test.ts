@@ -5153,6 +5153,225 @@ describe('executeDagWorkflow -- Claude SDK advanced options', () => {
   });
 });
 
+describe('executeDagWorkflow -- Codex effective config', () => {
+  let testDir: string;
+
+  beforeEach(async () => {
+    testDir = join(
+      tmpdir(),
+      `dag-codex-config-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    const commandsDir = join(testDir, '.archon', 'commands');
+    await mkdir(commandsDir, { recursive: true });
+    await writeFile(join(commandsDir, 'my-cmd.md'), 'My command prompt');
+
+    mockSendQueryDag.mockClear();
+    mockGetAgentProviderDag.mockClear();
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: 'codex response' };
+      yield { type: 'result', sessionId: 'codex-cfg-sid' };
+    });
+    mockGetAgentProviderDag.mockImplementation(() => ({
+      sendQuery: mockSendQueryDag,
+      getType: () => 'codex',
+      getCapabilities: mockCodexCapabilities,
+    }));
+  });
+
+  afterEach(async () => {
+    try {
+      await rm(testDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  it('merges workflow-level modelReasoningEffort into Codex assistantConfig', async () => {
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-codex-cfg',
+      testDir,
+      {
+        name: 'codex-cfg-test',
+        nodes: [{ id: 'step', command: 'my-cmd', provider: 'codex' }],
+        modelReasoningEffort: 'high',
+      },
+      workflowRun,
+      'codex',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      { ...minimalConfig, assistant: 'codex' }
+    );
+
+    expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
+    const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
+    const assistantConfig = optionsArg?.assistantConfig as Record<string, unknown>;
+    expect(assistantConfig?.modelReasoningEffort).toBe('high');
+  });
+
+  it('merges workflow-level webSearchMode into Codex assistantConfig', async () => {
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-codex-cfg',
+      testDir,
+      {
+        name: 'codex-websearch-test',
+        nodes: [{ id: 'step', command: 'my-cmd', provider: 'codex' }],
+        webSearchMode: 'live',
+      },
+      workflowRun,
+      'codex',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      { ...minimalConfig, assistant: 'codex' }
+    );
+
+    expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
+    const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
+    const assistantConfig = optionsArg?.assistantConfig as Record<string, unknown>;
+    expect(assistantConfig?.webSearchMode).toBe('live');
+  });
+
+  it('workflow-level Codex config overrides assistant config defaults', async () => {
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    const configWithCodexAssistant: WorkflowConfig = {
+      ...minimalConfig,
+      assistant: 'codex',
+      assistants: {
+        claude: {},
+        codex: { modelReasoningEffort: 'medium', webSearchMode: 'cached' },
+      },
+    };
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-codex-override',
+      testDir,
+      {
+        name: 'codex-override-test',
+        nodes: [{ id: 'step', command: 'my-cmd', provider: 'codex' }],
+        modelReasoningEffort: 'high',
+        webSearchMode: 'live',
+      },
+      workflowRun,
+      'codex',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      configWithCodexAssistant
+    );
+
+    expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
+    const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
+    const assistantConfig = optionsArg?.assistantConfig as Record<string, unknown>;
+    expect(assistantConfig?.modelReasoningEffort).toBe('high');
+    expect(assistantConfig?.webSearchMode).toBe('live');
+  });
+
+  it('assistant config values remain when workflow-level Codex fields are absent', async () => {
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    const configWithCodexAssistant: WorkflowConfig = {
+      ...minimalConfig,
+      assistant: 'codex',
+      assistants: {
+        claude: {},
+        codex: { modelReasoningEffort: 'xhigh' },
+      },
+    };
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-codex-fallback',
+      testDir,
+      {
+        name: 'codex-fallback-test',
+        nodes: [{ id: 'step', command: 'my-cmd', provider: 'codex' }],
+        // no modelReasoningEffort or webSearchMode at workflow level
+      },
+      workflowRun,
+      'codex',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      configWithCodexAssistant
+    );
+
+    expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
+    const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
+    const assistantConfig = optionsArg?.assistantConfig as Record<string, unknown>;
+    expect(assistantConfig?.modelReasoningEffort).toBe('xhigh');
+  });
+
+  it('does not apply Codex workflow config to Claude nodes', async () => {
+    mockGetAgentProviderDag.mockImplementation(() => ({
+      sendQuery: mockSendQueryDag,
+      getType: () => 'claude',
+      getCapabilities: mockClaudeCapabilities,
+    }));
+
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-claude-no-codex',
+      testDir,
+      {
+        name: 'claude-no-codex-test',
+        nodes: [{ id: 'step', command: 'my-cmd' }],
+        modelReasoningEffort: 'high',
+        webSearchMode: 'live',
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
+    const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
+    const assistantConfig = optionsArg?.assistantConfig as Record<string, unknown>;
+    // Claude's assistantConfig should not have Codex-specific fields injected
+    expect(assistantConfig?.modelReasoningEffort).toBeUndefined();
+    expect(assistantConfig?.webSearchMode).toBeUndefined();
+  });
+});
+
 describe('executeDagWorkflow -- cost tracking', () => {
   let testDir: string;
 

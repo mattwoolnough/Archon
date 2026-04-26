@@ -7,6 +7,9 @@ import { createLogger } from '@archon/paths';
 import { isModelCompatible } from './model-validation';
 import {
   dagNodeSchema,
+  effortLevelSchema,
+  thinkingConfigSchema,
+  sandboxSettingsSchema,
   BASH_NODE_AI_FIELDS,
   SCRIPT_NODE_AI_FIELDS,
   LOOP_NODE_AI_FIELDS,
@@ -330,6 +333,88 @@ export function parseWorkflow(content: string, filename: string): ParseResult {
       getLog().warn({ filename, value: raw.interactive }, 'invalid_interactive_value_ignored');
     }
 
+    // Parse strict orchestration-control fields — invalid values fail load (not warn-and-ignore)
+    let effort: z.infer<typeof effortLevelSchema> | undefined;
+    if (raw.effort !== undefined) {
+      const r = effortLevelSchema.safeParse(raw.effort);
+      if (!r.success) {
+        return {
+          workflow: null,
+          error: {
+            filename,
+            error: `Invalid 'effort' value "${JSON.stringify(raw.effort)}": must be one of ${effortLevelSchema.options.join(', ')}`,
+            errorType: 'validation_error',
+          },
+        };
+      }
+      effort = r.data;
+    }
+
+    let thinking: z.infer<typeof thinkingConfigSchema> | undefined;
+    if (raw.thinking !== undefined) {
+      const r = thinkingConfigSchema.safeParse(raw.thinking);
+      if (!r.success) {
+        return {
+          workflow: null,
+          error: {
+            filename,
+            error: `Invalid 'thinking' value: ${r.error.issues.map(i => i.message).join('; ')}`,
+            errorType: 'validation_error',
+          },
+        };
+      }
+      thinking = r.data;
+    }
+
+    let fallbackModel: string | undefined;
+    if (raw.fallbackModel !== undefined) {
+      const r = z.string().min(1).safeParse(raw.fallbackModel);
+      if (!r.success) {
+        return {
+          workflow: null,
+          error: {
+            filename,
+            error: "Invalid 'fallbackModel' value: must be a non-empty string",
+            errorType: 'validation_error',
+          },
+        };
+      }
+      fallbackModel = r.data;
+    }
+
+    let betas: [string, ...string[]] | undefined;
+    if (raw.betas !== undefined) {
+      const betasSchema = z.array(z.string().min(1)).nonempty("'betas' must be a non-empty array");
+      const r = betasSchema.safeParse(raw.betas);
+      if (!r.success) {
+        return {
+          workflow: null,
+          error: {
+            filename,
+            error: `Invalid 'betas' value: ${r.error.issues.map(i => i.message).join('; ')}`,
+            errorType: 'validation_error',
+          },
+        };
+      }
+      betas = r.data;
+    }
+
+    let sandbox: z.infer<typeof sandboxSettingsSchema> | undefined;
+    if (raw.sandbox !== undefined) {
+      const r = sandboxSettingsSchema.safeParse(raw.sandbox);
+      if (!r.success) {
+        return {
+          workflow: null,
+          error: {
+            filename,
+            error: `Invalid 'sandbox' value: ${r.error.issues.map(i => i.message).join('; ')}`,
+            errorType: 'validation_error',
+          },
+        };
+      }
+      sandbox = r.data;
+    }
+
     // Warn if any interactive loop node exists in a non-interactive workflow
     // (approval messages won't reach the user in web background runs)
     if (!interactive) {
@@ -371,6 +456,11 @@ export function parseWorkflow(content: string, filename: string): ParseResult {
         webSearchMode,
         additionalDirectories,
         interactive,
+        ...(effort !== undefined ? { effort } : {}),
+        ...(thinking !== undefined ? { thinking } : {}),
+        ...(fallbackModel !== undefined ? { fallbackModel } : {}),
+        ...(betas !== undefined ? { betas } : {}),
+        ...(sandbox !== undefined ? { sandbox } : {}),
         nodes: dagNodes,
         ...(worktreePolicy ? { worktree: worktreePolicy } : {}),
       },
