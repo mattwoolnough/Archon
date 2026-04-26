@@ -91,7 +91,11 @@ function buildSubprocessEnv(): NodeJS.ProcessEnv {
     { authMode },
     authMode === 'global' ? 'using_global_auth' : 'using_explicit_tokens'
   );
-  return { ...process.env };
+  const env = { ...process.env };
+  if (authMode === 'global') {
+    delete env.ANTHROPIC_API_KEY;
+  }
+  return env;
 }
 
 /** Max retries for transient subprocess failures */
