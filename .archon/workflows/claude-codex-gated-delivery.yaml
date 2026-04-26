@@ -39,23 +39,29 @@ nodes:
   # ═══════════════════════════════════════════════════════════════════════════
   #
   # Invocation: archon run claude-codex-gated-delivery <feature-id> <objective…>
-  #   $1         = feature-id (required, kebab-case slug)
-  #   $ARGUMENTS = full invocation string (we strip $1 to get the objective)
+  #   $ARGUMENTS = full invocation string; first word is the feature-id,
+  #                remainder is the objective.
+  #
+  # NOTE: $1/$2/$3 are NOT substituted in bash nodes — only $ARGUMENTS,
+  # $ARTIFACTS_DIR, $BASE_BRANCH, $WORKFLOW_ID, etc. are available.
+  # Use $init.output in downstream nodes for the run directory path.
   - id: init
     bash: |
       set -euo pipefail
 
-      FEATURE_ID="$1"
+      ALL_ARGS="$ARGUMENTS"
+      FEATURE_ID="${ALL_ARGS%% *}"
       if [ -z "$FEATURE_ID" ]; then
         echo "ERROR: first argument must be a feature-id (kebab-case slug)" >&2
         exit 1
       fi
-
-      ALL_ARGS="$ARGUMENTS"
-      OBJECTIVE="${ALL_ARGS#"$FEATURE_ID"}"
-      OBJECTIVE="${OBJECTIVE# }"
-      if [ -z "$OBJECTIVE" ]; then
+      if [ "$FEATURE_ID" = "$ALL_ARGS" ]; then
         echo "ERROR: objective is required after the feature-id" >&2
+        exit 1
+      fi
+      OBJECTIVE="${ALL_ARGS#* }"
+      if [ -z "$OBJECTIVE" ]; then
+        echo "ERROR: objective cannot be empty" >&2
         exit 1
       fi
 
@@ -80,7 +86,8 @@ nodes:
       JSON
       mv "$RUN_DIR/state/pipeline.json.tmp" "$RUN_DIR/state/pipeline.json"
 
-      echo "$RUN_DIR"
+      # Output path without trailing newline so $init.output is safe in path concatenation.
+      printf '%s' "$RUN_DIR"
     timeout: 30000
 
   # ═══════════════════════════════════════════════════════════════════════════
@@ -93,9 +100,9 @@ nodes:
     provider: claude
     allowed_tools: [Read, Write, Glob, Grep, Bash]
     prompt: |
-      You are the AUTHOR. Read .factory/runs/$1/state/pipeline.json for context.
+      You are the AUTHOR. Read $init.output/state/pipeline.json for context.
       Produce a brownfield context pack at:
-          .factory/runs/$1/brownfield/attempt-1/artifact.md
+          $init.output/brownfield/attempt-1/artifact.md
 
       The pack MUST cover: repo purpose, existing architecture, key modules,
       existing tests, build commands, quality commands, deployment assumptions,
@@ -103,7 +110,7 @@ nodes:
       conventions, known constraints.
 
       Use Glob/Grep/Read to inspect the actual repo. Do NOT guess. Do NOT modify
-      any files outside `.factory/runs/$1/`. Output "BROWNFIELD_DRAFTED" when done.
+      any files outside $init.output/. Output "BROWNFIELD_DRAFTED" when done.
 
   - id: brownfield-snapshot-1
     depends_on: [brownfield-author-1]
@@ -141,9 +148,8 @@ nodes:
         reopen_gate: { type: [string, "null"], enum: [SPEC, PLAN, null] }
         confidence: { type: string, enum: [high, medium, low] }
     prompt: |
-      You are the REVIEWER. You are read-only. Do not Write, Edit, or modify any
-      file. Do not run destructive commands. Read:
-          .factory/runs/$1/brownfield/attempt-1/artifact.md
+      You are the REVIEWER. Read-only. Do not Write, Edit, or modify any file.
+      Read: $init.output/brownfield/attempt-1/artifact.md
       Approve only when the pack covers every required section AND is faithful
       to the actual repo. Return strict JSON conforming to the response schema.
 
@@ -166,7 +172,7 @@ nodes:
     bash: |
       set -euo pipefail
       VERDICT='$brownfield-review-1.output.verdict'
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/brownfield/attempt-1"
       printf '%s\n' '$brownfield-review-1.output' > "$RUN_DIR/brownfield/attempt-1/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 1 <<'PY'
@@ -190,12 +196,12 @@ nodes:
     allowed_tools: [Read, Write, Glob, Grep, Bash]
     prompt: |
       Codex rejected attempt 1. Read its review:
-          .factory/runs/$1/brownfield/attempt-1/review.json
+          $init.output/brownfield/attempt-1/review.json
       Address every blocking issue. Do NOT rewrite unrelated sections.
       Write the revised pack to:
-          .factory/runs/$1/brownfield/attempt-2/artifact.md
+          $init.output/brownfield/attempt-2/artifact.md
       Also write a one-paragraph revision summary to:
-          .factory/runs/$1/brownfield/attempt-2/revision-summary.md
+          $init.output/brownfield/attempt-2/revision-summary.md
       Output "BROWNFIELD_REVISED".
 
   - id: brownfield-snapshot-2
@@ -213,7 +219,7 @@ nodes:
     provider: codex
     output_format: *reviewer-schema
     prompt: |
-      Read-only review of .factory/runs/$1/brownfield/attempt-2/artifact.md
+      Read-only review of $init.output/brownfield/attempt-2/artifact.md
       against attempt-1/review.json. Confirm every blocking issue is resolved.
       Return strict JSON.
 
@@ -234,7 +240,7 @@ nodes:
     bash: |
       set -euo pipefail
       VERDICT='$brownfield-review-2.output.verdict'
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/brownfield/attempt-2"
       printf '%s\n' '$brownfield-review-2.output' > "$RUN_DIR/brownfield/attempt-2/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 2 <<'PY'
@@ -257,15 +263,13 @@ nodes:
     allowed_tools: [Read, Write, Glob, Grep, Bash]
     prompt: |
       Codex rejected both prior attempts. Read both reviews:
-          .factory/runs/$1/brownfield/attempt-2/review.json (latest)
-          .factory/runs/$1/brownfield/attempt-1/review.json (original)
+          $init.output/brownfield/attempt-2/review.json (latest)
+          $init.output/brownfield/attempt-1/review.json (original)
       This is the FINAL auto-attempt. Address every outstanding blocking issue.
       If any blocker requires a design decision you cannot make, note it explicitly
       so the human reviewer can decide at the approval gate.
-      Write to:
-          .factory/runs/$1/brownfield/attempt-3/artifact.md
-      Write a revision summary to:
-          .factory/runs/$1/brownfield/attempt-3/revision-summary.md
+      Write to: $init.output/brownfield/attempt-3/artifact.md
+      Write a revision summary to: $init.output/brownfield/attempt-3/revision-summary.md
       Output "BROWNFIELD_REVISED".
 
   - id: brownfield-snapshot-3
@@ -283,8 +287,8 @@ nodes:
     provider: codex
     output_format: *reviewer-schema
     prompt: |
-      Final auto-review. Read .factory/runs/$1/brownfield/attempt-3/artifact.md
-      against attempt-2/review.json. This is the last attempt before escalation.
+      Final auto-review. Read $init.output/brownfield/attempt-3/artifact.md
+      against attempt-2/review.json. Last attempt before escalation.
       Approve only if every blocker from prior reviews is resolved. Return strict JSON.
 
   - id: brownfield-mutation-check-3
@@ -304,7 +308,7 @@ nodes:
     bash: |
       set -euo pipefail
       VERDICT='$brownfield-review-3.output.verdict'
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/brownfield/attempt-3"
       printf '%s\n' '$brownfield-review-3.output' > "$RUN_DIR/brownfield/attempt-3/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 3 <<'PY'
@@ -335,8 +339,8 @@ nodes:
     when: "$brownfield-final.output != 'APPROVED'"
     approval:
       message: |
-        BROWNFIELD CONTEXT GATE failed after all auto-attempts for feature "$1".
-        Latest review: .factory/runs/$1/brownfield/attempt-3/review.json
+        BROWNFIELD CONTEXT GATE failed after all auto-attempts.
+        Check the brownfield attempt reviews under the worktree .factory/runs/ directory.
         Approve to override (use sparingly), or reject with feedback to abort.
       capture_response: true
       on_reject:
@@ -357,26 +361,25 @@ nodes:
     provider: claude
     allowed_tools: [Read, Write, Glob, Grep, Bash]
     prompt: |
-      Read .factory/runs/$1/state/pipeline.json for context and the approved
-      brownfield context pack (highest-numbered attempt) at:
-          .factory/runs/$1/brownfield/
+      Read $init.output/state/pipeline.json for context and the approved
+      brownfield context pack (highest-numbered attempt) under:
+          $init.output/brownfield/
 
       Author the feature specification for: $ARGUMENTS
 
       The spec MUST cover:
         • Objective and scope — what the feature does and explicitly does NOT do
-        • Functional requirements — every requirement must be clear and independently testable
+        • Functional requirements — each must be clear and independently testable
         • Non-functional requirements — performance, security, reliability, observability
         • Acceptance criteria — measurable, linkable to a specific test
         • Non-goals — explicit list of out-of-scope items
-        • Security implications — authentication, authorisation, data sensitivity,
-          new attack surface, third-party dependencies
+        • Security implications — auth, data sensitivity, new attack surface, dependencies
         • Brownfield constraints respected — no rewrite of areas flagged as protected
-        • Open design decisions — list any unresolved choices with the options considered
+        • Open design decisions — list any unresolved choices with options considered
 
       Write to BOTH:
           .specify/spec.md
-          .factory/runs/$1/spec/attempt-1/artifact.md
+          $init.output/spec/attempt-1/artifact.md
       Output "SPEC_DRAFTED" when done.
 
   - id: spec-snapshot-1
@@ -394,12 +397,12 @@ nodes:
     prompt: |
       You are the REVIEWER. Read-only. Do not Write, Edit, or modify any file.
       Read:
-          .factory/runs/$1/spec/attempt-1/artifact.md
-          .factory/runs/$1/brownfield/attempt-*/artifact.md (highest-numbered)
+          $init.output/spec/attempt-1/artifact.md
+          $init.output/brownfield/attempt-*/artifact.md (highest-numbered)
 
       Approve only when ALL of the following hold:
         • Every requirement is clear, unambiguous, and independently testable
-        • Non-goals are explicit and cover the obvious adjacent scope risks
+        • Non-goals are explicit and cover obvious adjacent scope risks
         • Acceptance criteria are measurable and linkable to a specific test
         • Security implications are addressed (auth, data sensitivity, attack surface)
         • Brownfield constraints from the context pack are respected
@@ -421,7 +424,7 @@ nodes:
     bash: |
       set -euo pipefail
       VERDICT='$spec-review-1.output.verdict'
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/spec/attempt-1"
       printf '%s\n' '$spec-review-1.output' > "$RUN_DIR/spec/attempt-1/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 1 <<'PY'
@@ -445,12 +448,12 @@ nodes:
     allowed_tools: [Read, Write, Glob, Grep, Bash]
     prompt: |
       Codex rejected the spec. Read the review:
-          .factory/runs/$1/spec/attempt-1/review.json
+          $init.output/spec/attempt-1/review.json
       Address every blocking issue. Do NOT rewrite passing sections.
       Update .specify/spec.md in place and write to:
-          .factory/runs/$1/spec/attempt-2/artifact.md
+          $init.output/spec/attempt-2/artifact.md
       Write a revision summary to:
-          .factory/runs/$1/spec/attempt-2/revision-summary.md
+          $init.output/spec/attempt-2/revision-summary.md
       Output "SPEC_REVISED".
 
   - id: spec-snapshot-2
@@ -468,7 +471,7 @@ nodes:
     provider: codex
     output_format: *reviewer-schema
     prompt: |
-      Read-only review of .factory/runs/$1/spec/attempt-2/artifact.md against
+      Read-only review of $init.output/spec/attempt-2/artifact.md against
       attempt-1/review.json. Confirm every blocking issue is resolved. Return strict JSON.
 
   - id: spec-mutation-check-2
@@ -488,7 +491,7 @@ nodes:
     bash: |
       set -euo pipefail
       VERDICT='$spec-review-2.output.verdict'
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/spec/attempt-2"
       printf '%s\n' '$spec-review-2.output' > "$RUN_DIR/spec/attempt-2/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 2 <<'PY'
@@ -512,15 +515,13 @@ nodes:
     allowed_tools: [Read, Write, Glob, Grep, Bash]
     prompt: |
       Codex rejected both prior spec attempts. Read both reviews:
-          .factory/runs/$1/spec/attempt-2/review.json (latest)
-          .factory/runs/$1/spec/attempt-1/review.json (original)
+          $init.output/spec/attempt-2/review.json (latest)
+          $init.output/spec/attempt-1/review.json (original)
       This is the FINAL auto-attempt. Address every outstanding blocker.
-      If any blocker requires a design decision you cannot make, note it explicitly
+      If any blocker requires a decision you cannot make, note it explicitly
       for the human reviewer at the approval gate.
-      Update .specify/spec.md and write to:
-          .factory/runs/$1/spec/attempt-3/artifact.md
-      Write a revision summary to:
-          .factory/runs/$1/spec/attempt-3/revision-summary.md
+      Update .specify/spec.md and write to: $init.output/spec/attempt-3/artifact.md
+      Write a revision summary to: $init.output/spec/attempt-3/revision-summary.md
       Output "SPEC_REVISED".
 
   - id: spec-snapshot-3
@@ -538,8 +539,8 @@ nodes:
     provider: codex
     output_format: *reviewer-schema
     prompt: |
-      Final auto-review. Read .factory/runs/$1/spec/attempt-3/artifact.md against
-      attempt-2/review.json. This is the last attempt before escalation.
+      Final auto-review. Read $init.output/spec/attempt-3/artifact.md against
+      attempt-2/review.json. Last attempt before escalation.
       Approve only if every blocker from prior reviews is resolved. Return strict JSON.
 
   - id: spec-mutation-check-3
@@ -559,7 +560,7 @@ nodes:
     bash: |
       set -euo pipefail
       VERDICT='$spec-review-3.output.verdict'
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/spec/attempt-3"
       printf '%s\n' '$spec-review-3.output' > "$RUN_DIR/spec/attempt-3/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 3 <<'PY'
@@ -591,9 +592,8 @@ nodes:
     when: "$spec-final.output != 'APPROVED'"
     approval:
       message: |
-        SPEC GATE failed after all auto-attempts for feature "$1".
-        Latest review: .factory/runs/$1/spec/attempt-3/review.json
-        Current spec: .specify/spec.md
+        SPEC GATE failed after all auto-attempts.
+        Check spec attempt reviews and .specify/spec.md in the worktree.
         Approve to override (use sparingly), or reject with feedback to abort.
       capture_response: true
       on_reject:
@@ -614,8 +614,8 @@ nodes:
     provider: claude
     allowed_tools: [Read, Write, Glob, Grep, Bash]
     prompt: |
-      Read the approved spec at .specify/spec.md and the brownfield context at
-      .factory/runs/$1/brownfield/. Author the implementation plan.
+      Read the approved spec at .specify/spec.md and the brownfield context under
+      $init.output/brownfield/. Author the implementation plan.
 
       The plan MUST cover:
         • Ordered implementation steps — concrete, executable, small enough to commit atomically
@@ -627,7 +627,7 @@ nodes:
 
       Write to BOTH:
           .specify/plan.md
-          .factory/runs/$1/plan/attempt-1/artifact.md
+          $init.output/plan/attempt-1/artifact.md
       Output "PLAN_DRAFTED" when done.
 
   - id: plan-snapshot-1
@@ -645,7 +645,7 @@ nodes:
     prompt: |
       You are the REVIEWER. Read-only. Do not Write, Edit, or modify any file.
       Read:
-          .factory/runs/$1/plan/attempt-1/artifact.md
+          $init.output/plan/attempt-1/artifact.md
           .specify/spec.md
 
       Approve only when ALL of the following hold:
@@ -672,7 +672,7 @@ nodes:
     bash: |
       set -euo pipefail
       VERDICT='$plan-review-1.output.verdict'
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/plan/attempt-1"
       printf '%s\n' '$plan-review-1.output' > "$RUN_DIR/plan/attempt-1/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 1 <<'PY'
@@ -696,12 +696,12 @@ nodes:
     allowed_tools: [Read, Write, Glob, Grep, Bash]
     prompt: |
       Codex rejected the plan. Read the review:
-          .factory/runs/$1/plan/attempt-1/review.json
+          $init.output/plan/attempt-1/review.json
       Address every blocking issue. Do NOT expand scope.
       Update .specify/plan.md in place and write to:
-          .factory/runs/$1/plan/attempt-2/artifact.md
+          $init.output/plan/attempt-2/artifact.md
       Write a revision summary to:
-          .factory/runs/$1/plan/attempt-2/revision-summary.md
+          $init.output/plan/attempt-2/revision-summary.md
       Output "PLAN_REVISED".
 
   - id: plan-snapshot-2
@@ -719,7 +719,7 @@ nodes:
     provider: codex
     output_format: *reviewer-schema
     prompt: |
-      Read-only review of .factory/runs/$1/plan/attempt-2/artifact.md against
+      Read-only review of $init.output/plan/attempt-2/artifact.md against
       attempt-1/review.json. Confirm every blocking issue is resolved. Return strict JSON.
 
   - id: plan-mutation-check-2
@@ -739,7 +739,7 @@ nodes:
     bash: |
       set -euo pipefail
       VERDICT='$plan-review-2.output.verdict'
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/plan/attempt-2"
       printf '%s\n' '$plan-review-2.output' > "$RUN_DIR/plan/attempt-2/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 2 <<'PY'
@@ -763,14 +763,12 @@ nodes:
     allowed_tools: [Read, Write, Glob, Grep, Bash]
     prompt: |
       Codex rejected both prior plan attempts. Read both reviews:
-          .factory/runs/$1/plan/attempt-2/review.json (latest)
-          .factory/runs/$1/plan/attempt-1/review.json (original)
+          $init.output/plan/attempt-2/review.json (latest)
+          $init.output/plan/attempt-1/review.json (original)
       This is the FINAL auto-attempt. Address every outstanding blocker.
       If any blocker requires a decision you cannot make, note it explicitly.
-      Update .specify/plan.md and write to:
-          .factory/runs/$1/plan/attempt-3/artifact.md
-      Write a revision summary to:
-          .factory/runs/$1/plan/attempt-3/revision-summary.md
+      Update .specify/plan.md and write to: $init.output/plan/attempt-3/artifact.md
+      Write a revision summary to: $init.output/plan/attempt-3/revision-summary.md
       Output "PLAN_REVISED".
 
   - id: plan-snapshot-3
@@ -788,8 +786,8 @@ nodes:
     provider: codex
     output_format: *reviewer-schema
     prompt: |
-      Final auto-review. Read .factory/runs/$1/plan/attempt-3/artifact.md against
-      attempt-2/review.json. This is the last attempt before escalation.
+      Final auto-review. Read $init.output/plan/attempt-3/artifact.md against
+      attempt-2/review.json. Last attempt before escalation.
       Approve only if every blocker from prior reviews is resolved. Return strict JSON.
 
   - id: plan-mutation-check-3
@@ -809,7 +807,7 @@ nodes:
     bash: |
       set -euo pipefail
       VERDICT='$plan-review-3.output.verdict'
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/plan/attempt-3"
       printf '%s\n' '$plan-review-3.output' > "$RUN_DIR/plan/attempt-3/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 3 <<'PY'
@@ -841,9 +839,8 @@ nodes:
     when: "$plan-final.output != 'APPROVED'"
     approval:
       message: |
-        PLAN GATE failed after all auto-attempts for feature "$1".
-        Latest review: .factory/runs/$1/plan/attempt-3/review.json
-        Current plan: .specify/plan.md
+        PLAN GATE failed after all auto-attempts.
+        Check plan attempt reviews and .specify/plan.md in the worktree.
         Approve to override (use sparingly), or reject with feedback to abort.
       capture_response: true
       on_reject:
@@ -863,20 +860,19 @@ nodes:
     model: opus[1m]
     allowed_tools: [Read, Write, Edit, Glob, Grep, Bash]
     prompt: |
-      Implement the approved plan (.specify/plan.md) for feature $1.
+      Implement the approved plan (.specify/plan.md).
       Stay strictly inside the approved spec and plan.
-      Commit each logical chunk: `git add -A && git commit -m "feat($1): …"`
+      Commit each logical chunk: `git add -A && git commit -m "feat: …"`
       When implementation is complete, output "CODE_IMPLEMENTED".
 
   - id: quality-1
     depends_on: [code-implement-1]
     bash: |
       set -euo pipefail
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/code/attempt-1"
       LOG="$RUN_DIR/code/attempt-1/quality.log"
 
-      # Detect quality command. Prefer `make quality`; fall back to bun run validate.
       if make -n quality >/dev/null 2>&1; then
         CMD="make quality"
       elif command -v bun >/dev/null && grep -q '"validate"' package.json 2>/dev/null; then
@@ -898,10 +894,10 @@ nodes:
     model: opus[1m]
     loop:
       prompt: |
-        The quality gate failed. Read the latest quality log under
-        .factory/runs/$1/code/attempt-*/quality.log and fix the failures.
-        Re-run the same command yourself; once it passes, commit and
-        output "QUALITY_FIXED".
+        The quality gate failed. Read the quality log at:
+            $init.output/code/attempt-1/quality.log
+        Fix the failures, re-run the quality command yourself; once it passes,
+        commit and output "QUALITY_FIXED".
       until: QUALITY_FIXED
       max_iterations: 3
       until_bash: |
@@ -917,10 +913,10 @@ nodes:
       set -euo pipefail
       git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-cr.txt"
       git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-cr.txt"
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/code/attempt-1"
-      # Use $BASE_BRANCH unquoted so Archon's substitution ('main') concatenates
-      # cleanly with ..HEAD as a single git range argument.
+      # $BASE_BRANCH is substituted to a shell-quoted branch name ('main').
+      # Used unquoted so it concatenates cleanly with ..HEAD as one git range token.
       git diff $BASE_BRANCH..HEAD > "$RUN_DIR/code/attempt-1/diff.patch" \
         || git diff HEAD~1 HEAD > "$RUN_DIR/code/attempt-1/diff.patch"
       echo ok
@@ -930,9 +926,10 @@ nodes:
     provider: codex
     output_format: *reviewer-schema
     prompt: |
-      You are the REVIEWER. Read-only. Read the approved brownfield/spec/plan
-      and the diff at .factory/runs/$1/code/attempt-1/diff.patch. Read the
-      quality log at .factory/runs/$1/code/attempt-1/quality.log. Confirm:
+      You are the REVIEWER. Read-only. Read the approved brownfield/spec/plan and:
+          $init.output/code/attempt-1/diff.patch
+          $init.output/code/attempt-1/quality.log
+      Confirm:
         • Implementation matches the approved spec and plan
         • No unapproved scope is introduced
         • Tests are meaningful (not just coverage padding)
@@ -950,7 +947,7 @@ nodes:
         || { echo "FATAL: Codex committed during code review" >&2; exit 1; }
       diff -q "$ARTIFACTS_DIR/codex-pre-status-cr.txt" <(git status --porcelain) \
         || { echo "FATAL: Codex modified working tree during code review" >&2; exit 1; }
-      RUN_DIR=".factory/runs/$1"
+      RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/code/attempt-1"
       printf '%s\n' '$code-review-1.output' > "$RUN_DIR/code/attempt-1/review.json"
       echo ok
@@ -962,7 +959,7 @@ nodes:
     loop:
       prompt: |
         Codex rejected the code review. Read:
-            .factory/runs/$1/code/attempt-1/review.json
+            $init.output/code/attempt-1/review.json
         Address every blocking issue, run quality locally, commit, and output
         "CODE_REVIEW_FIXED". Do NOT expand scope; if the feedback requires
         design judgement, output "NEEDS_HUMAN" instead.
@@ -983,9 +980,8 @@ nodes:
     when: "$code-final.output != 'APPROVED'"
     approval:
       message: |
-        CODE GATE failed for feature "$1" after auto-fix attempts.
-        Latest review: .factory/runs/$1/code/attempt-1/review.json
-        Diff: .factory/runs/$1/code/attempt-1/diff.patch
+        CODE GATE failed after auto-fix attempts.
+        Check code review and diff under the worktree .factory/runs/ directory.
         Approve to merge anyway (override), or reject to abort.
       capture_response: true
       on_reject:
@@ -1002,6 +998,8 @@ nodes:
     trigger_rule: one_success
     bash: |
       set -euo pipefail
+      ALL_ARGS="$ARGUMENTS"
+      FEATURE_ID="${ALL_ARGS%% *}"
       git status --short
       git log --oneline -10
-      echo "Pipeline complete for feature $1"
+      echo "Pipeline complete for feature $FEATURE_ID"
