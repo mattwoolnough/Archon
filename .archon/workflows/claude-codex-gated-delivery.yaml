@@ -123,6 +123,7 @@ nodes:
   - id: brownfield-review-1
     depends_on: [brownfield-snapshot-1]
     provider: codex
+    model: gpt-5.2
     output_format: &reviewer-schema
       type: object
       required: [verdict, blocking_issues, required_changes, confidence]
@@ -217,6 +218,7 @@ nodes:
     depends_on: [brownfield-snapshot-2]
     when: "$brownfield-decide-1.output != 'APPROVED'"
     provider: codex
+    model: gpt-5.2
     output_format: *reviewer-schema
     prompt: |
       Read-only review of $init.output/brownfield/attempt-2/artifact.md
@@ -285,6 +287,7 @@ nodes:
     depends_on: [brownfield-snapshot-3]
     when: "$brownfield-decide-1.output != 'APPROVED' && $brownfield-decide-2.output != 'APPROVED'"
     provider: codex
+    model: gpt-5.2
     output_format: *reviewer-schema
     prompt: |
       Final auto-review. Read $init.output/brownfield/attempt-3/artifact.md
@@ -393,6 +396,7 @@ nodes:
   - id: spec-review-1
     depends_on: [spec-snapshot-1]
     provider: codex
+    model: gpt-5.2
     output_format: *reviewer-schema
     prompt: |
       You are the REVIEWER. Read-only. Do not Write, Edit, or modify any file.
@@ -469,6 +473,7 @@ nodes:
     depends_on: [spec-snapshot-2]
     when: "$spec-decide-1.output != 'APPROVED'"
     provider: codex
+    model: gpt-5.2
     output_format: *reviewer-schema
     prompt: |
       Read-only review of $init.output/spec/attempt-2/artifact.md against
@@ -537,6 +542,7 @@ nodes:
     depends_on: [spec-snapshot-3]
     when: "$spec-decide-1.output != 'APPROVED' && $spec-decide-2.output != 'APPROVED'"
     provider: codex
+    model: gpt-5.2
     output_format: *reviewer-schema
     prompt: |
       Final auto-review. Read $init.output/spec/attempt-3/artifact.md against
@@ -641,6 +647,7 @@ nodes:
   - id: plan-review-1
     depends_on: [plan-snapshot-1]
     provider: codex
+    model: gpt-5.2
     output_format: *reviewer-schema
     prompt: |
       You are the REVIEWER. Read-only. Do not Write, Edit, or modify any file.
@@ -717,6 +724,7 @@ nodes:
     depends_on: [plan-snapshot-2]
     when: "$plan-decide-1.output != 'APPROVED'"
     provider: codex
+    model: gpt-5.2
     output_format: *reviewer-schema
     prompt: |
       Read-only review of $init.output/plan/attempt-2/artifact.md against
@@ -784,6 +792,7 @@ nodes:
     depends_on: [plan-snapshot-3]
     when: "$plan-decide-1.output != 'APPROVED' && $plan-decide-2.output != 'APPROVED'"
     provider: codex
+    model: gpt-5.2
     output_format: *reviewer-schema
     prompt: |
       Final auto-review. Read $init.output/plan/attempt-3/artifact.md against
@@ -924,6 +933,7 @@ nodes:
   - id: code-review-1
     depends_on: [code-review-snapshot]
     provider: codex
+    model: gpt-5.2
     output_format: *reviewer-schema
     prompt: |
       You are the REVIEWER. Read-only. Read the approved brownfield/spec/plan and:
