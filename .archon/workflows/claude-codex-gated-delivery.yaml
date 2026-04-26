@@ -126,17 +126,21 @@ nodes:
     model: gpt-5.2
     output_format: &reviewer-schema
       type: object
-      required: [verdict, blocking_issues, required_changes, confidence]
+      additionalProperties: false
+      required: [verdict, rejection_type, blocking_issues, required_changes, design_question, reopen_gate, confidence]
       properties:
         verdict: { type: string, enum: [APPROVED, REJECTED, NEEDS_HUMAN] }
         rejection_type:
-          type: [string, "null"]
-          enum: [FIXABLE, DESIGN_DECISION_REQUIRED, REVIEWER_UNCERTAIN, OUT_OF_SCOPE,
-                 QUALITY_INFRASTRUCTURE_MISSING, UPSTREAM_ARTEFACT_DEFECT, NON_CONVERGENT, null]
+          anyOf:
+            - type: string
+              enum: [FIXABLE, DESIGN_DECISION_REQUIRED, REVIEWER_UNCERTAIN, OUT_OF_SCOPE,
+                     QUALITY_INFRASTRUCTURE_MISSING, UPSTREAM_ARTEFACT_DEFECT, NON_CONVERGENT]
+            - type: "null"
         blocking_issues:
           type: array
           items:
             type: object
+            additionalProperties: false
             required: [id, severity, location, issue, required_change]
             properties:
               id: { type: string }
@@ -145,8 +149,14 @@ nodes:
               issue: { type: string }
               required_change: { type: string }
         required_changes: { type: array, items: { type: string } }
-        design_question: { type: [string, "null"] }
-        reopen_gate: { type: [string, "null"], enum: [SPEC, PLAN, null] }
+        design_question:
+          anyOf:
+            - { type: string }
+            - { type: "null" }
+        reopen_gate:
+          anyOf:
+            - { type: string, enum: [SPEC, PLAN] }
+            - { type: "null" }
         confidence: { type: string, enum: [high, medium, low] }
     prompt: |
       You are the REVIEWER. Read-only. Do not Write, Edit, or modify any file.
