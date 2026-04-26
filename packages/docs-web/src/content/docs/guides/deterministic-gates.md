@@ -95,7 +95,7 @@ parses it, and emits exactly one gate token to stdout.
   bash: |
     set -euo pipefail
 
-    RAW="${spec-review.output}"
+    RAW=$spec-review.output
 
     python3 - "$RAW" <<'PY'
     import json, sys
@@ -225,7 +225,7 @@ nodes:
     trigger_rule: all_done
     bash: |
       set -euo pipefail
-      RAW="${spec-review.output}"
+      RAW=$spec-review.output
       python3 - "$RAW" <<'PY'
       import json, sys
       raw = sys.argv[1]

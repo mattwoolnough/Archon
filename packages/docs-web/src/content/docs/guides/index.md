@@ -16,6 +16,8 @@ How-to guides for building and running AI coding workflows with Archon.
 - [Authoring Workflows](/guides/authoring-workflows/) — Create multi-step YAML workflows with DAG nodes, conditional branching, and parallel execution
 - [Authoring Commands](/guides/authoring-commands/) — Write prompt templates that serve as building blocks for workflow nodes
 
+- [Deterministic Gates](/guides/deterministic-gates/) — Fail-closed review gates using structured reviewer output and bash validation nodes
+
 ## Node Types
 
 - [Loop Nodes](/guides/loop-nodes/) — Iterative AI execution with completion conditions and deterministic exit checks

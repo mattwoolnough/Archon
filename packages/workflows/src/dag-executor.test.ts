@@ -5370,6 +5370,119 @@ describe('executeDagWorkflow -- Codex effective config', () => {
     expect(assistantConfig?.modelReasoningEffort).toBeUndefined();
     expect(assistantConfig?.webSearchMode).toBeUndefined();
   });
+
+  it('merges workflow-level additionalDirectories into Codex assistantConfig', async () => {
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-codex-dirs',
+      testDir,
+      {
+        name: 'codex-dirs-test',
+        nodes: [{ id: 'step', command: 'my-cmd', provider: 'codex' }],
+        additionalDirectories: ['/extra/repo'],
+      },
+      workflowRun,
+      'codex',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      { ...minimalConfig, assistant: 'codex' }
+    );
+
+    expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
+    const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
+    const assistantConfig = optionsArg?.assistantConfig as Record<string, unknown>;
+    expect(assistantConfig?.additionalDirectories).toEqual(['/extra/repo']);
+  });
+
+  it('merges Codex config for a Codex node inside a Claude-default workflow', async () => {
+    // Provider mock returns codex when the node overrides to codex
+    mockGetAgentProviderDag.mockImplementation((p: string) => ({
+      sendQuery: mockSendQueryDag,
+      getType: () => p,
+      getCapabilities: p === 'codex' ? mockCodexCapabilities : mockClaudeCapabilities,
+    }));
+
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-mixed-provider',
+      testDir,
+      {
+        name: 'mixed-provider-test',
+        // workflow defaults to claude but node overrides to codex
+        nodes: [{ id: 'step', command: 'my-cmd', provider: 'codex' }],
+        modelReasoningEffort: 'high',
+      },
+      workflowRun,
+      'claude', // workflow-level provider
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
+    const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
+    const assistantConfig = optionsArg?.assistantConfig as Record<string, unknown>;
+    expect(assistantConfig?.modelReasoningEffort).toBe('high');
+  });
+
+  it('merges Codex config for a loop node with provider codex', async () => {
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    const loopNode = {
+      id: 'loop-step',
+      provider: 'codex',
+      loop: {
+        prompt: 'Do some work',
+        until: 'Done',
+        max_iterations: 2,
+      },
+    };
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-codex-loop',
+      testDir,
+      {
+        name: 'codex-loop-test',
+        nodes: [loopNode as unknown as DagNode],
+        modelReasoningEffort: 'high',
+        webSearchMode: 'live',
+      },
+      workflowRun,
+      'codex',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      { ...minimalConfig, assistant: 'codex' }
+    );
+
+    expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
+    const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
+    const assistantConfig = optionsArg?.assistantConfig as Record<string, unknown>;
+    expect(assistantConfig?.modelReasoningEffort).toBe('high');
+    expect(assistantConfig?.webSearchMode).toBe('live');
+  });
 });
 
 describe('executeDagWorkflow -- cost tracking', () => {
