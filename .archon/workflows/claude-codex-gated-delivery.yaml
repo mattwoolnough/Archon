@@ -1,0 +1,1007 @@
+name: claude-codex-gated-delivery
+description: |
+  Use when: User wants a controlled spec → plan → code pipeline where Claude
+  authors every artefact and Codex independently reviews each stage before
+  the next stage may begin.
+  Triggers: "gated delivery", "claude codex pipeline", "spec-plan-code factory",
+            "adversarial spec review".
+  Does: Brownfield context → Spec → Plan → Code, with strict review gates
+        between every stage. Each gate runs up to 3 author/review/decide
+        attempts; on the third unapproved attempt the workflow halts at an
+        approval node so a human can override or abort. Codex is constrained
+        to read-only by an external git-snapshot guard around every Codex
+        node — Codex is NOT allowed to mutate the repo.
+  NOT for: Free-form coding tasks, single-prompt fixes, anything where the
+        author and reviewer should be the same model.
+
+# Defaults — overridden per node where Codex is the active provider.
+provider: claude
+model: sonnet
+
+# interactive: true is required because the human-halt approval nodes pause
+# the run and surface to the user via /workflow approve|reject.
+interactive: true
+
+# effort: high enables extended thinking on all Claude author nodes.
+effort: high
+
+# modelReasoningEffort: high enables deep reasoning on all Codex reviewer nodes.
+modelReasoningEffort: high
+
+# Worktree pinned ON: each run gets an isolated git checkout so the Codex
+# git-diff guard has stable HEAD references.
+worktree:
+  enabled: true
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # PHASE 0 — INIT: parse arguments, build directory tree, write state file
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  # Invocation: archon run claude-codex-gated-delivery <feature-id> <objective…>
+  #   $1         = feature-id (required, kebab-case slug)
+  #   $ARGUMENTS = full invocation string (we strip $1 to get the objective)
+  - id: init
+    bash: |
+      set -euo pipefail
+
+      FEATURE_ID="$1"
+      if [ -z "$FEATURE_ID" ]; then
+        echo "ERROR: first argument must be a feature-id (kebab-case slug)" >&2
+        exit 1
+      fi
+
+      ALL_ARGS="$ARGUMENTS"
+      OBJECTIVE="${ALL_ARGS#"$FEATURE_ID"}"
+      OBJECTIVE="${OBJECTIVE# }"
+      if [ -z "$OBJECTIVE" ]; then
+        echo "ERROR: objective is required after the feature-id" >&2
+        exit 1
+      fi
+
+      RUN_DIR=".factory/runs/$FEATURE_ID"
+      mkdir -p \
+        "$RUN_DIR/brownfield" \
+        "$RUN_DIR/spec" \
+        "$RUN_DIR/plan" \
+        "$RUN_DIR/code" \
+        "$RUN_DIR/state"
+
+      cat > "$RUN_DIR/state/pipeline.json.tmp" <<JSON
+      {
+        "feature_id": "$FEATURE_ID",
+        "objective": $(printf '%s' "$OBJECTIVE" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+        "current_gate": "BROWNFIELD",
+        "gate_state": "DRAFTING",
+        "attempt": 0,
+        "max_attempts_per_gate": 3,
+        "stale_downstream_gates": []
+      }
+      JSON
+      mv "$RUN_DIR/state/pipeline.json.tmp" "$RUN_DIR/state/pipeline.json"
+
+      echo "$RUN_DIR"
+    timeout: 30000
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GATE 0 — BROWNFIELD CONTEXT  (3 attempts: claude → codex → decide)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # --- Attempt 1 ----------------------------------------------------------
+  - id: brownfield-author-1
+    depends_on: [init]
+    provider: claude
+    allowed_tools: [Read, Write, Glob, Grep, Bash]
+    prompt: |
+      You are the AUTHOR. Read .factory/runs/$1/state/pipeline.json for context.
+      Produce a brownfield context pack at:
+          .factory/runs/$1/brownfield/attempt-1/artifact.md
+
+      The pack MUST cover: repo purpose, existing architecture, key modules,
+      existing tests, build commands, quality commands, deployment assumptions,
+      security-sensitive components, areas that must not be rewritten, existing
+      conventions, known constraints.
+
+      Use Glob/Grep/Read to inspect the actual repo. Do NOT guess. Do NOT modify
+      any files outside `.factory/runs/$1/`. Output "BROWNFIELD_DRAFTED" when done.
+
+  - id: brownfield-snapshot-1
+    depends_on: [brownfield-author-1]
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-bf1.txt"
+      git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-bf1.txt"
+      echo "snapshot taken"
+
+  - id: brownfield-review-1
+    depends_on: [brownfield-snapshot-1]
+    provider: codex
+    output_format: &reviewer-schema
+      type: object
+      required: [verdict, blocking_issues, required_changes, confidence]
+      properties:
+        verdict: { type: string, enum: [APPROVED, REJECTED, NEEDS_HUMAN] }
+        rejection_type:
+          type: [string, "null"]
+          enum: [FIXABLE, DESIGN_DECISION_REQUIRED, REVIEWER_UNCERTAIN, OUT_OF_SCOPE,
+                 QUALITY_INFRASTRUCTURE_MISSING, UPSTREAM_ARTEFACT_DEFECT, NON_CONVERGENT, null]
+        blocking_issues:
+          type: array
+          items:
+            type: object
+            required: [id, severity, location, issue, required_change]
+            properties:
+              id: { type: string }
+              severity: { type: string, enum: [blocker, major, minor] }
+              location: { type: string }
+              issue: { type: string }
+              required_change: { type: string }
+        required_changes: { type: array, items: { type: string } }
+        design_question: { type: [string, "null"] }
+        reopen_gate: { type: [string, "null"], enum: [SPEC, PLAN, null] }
+        confidence: { type: string, enum: [high, medium, low] }
+    prompt: |
+      You are the REVIEWER. You are read-only. Do not Write, Edit, or modify any
+      file. Do not run destructive commands. Read:
+          .factory/runs/$1/brownfield/attempt-1/artifact.md
+      Approve only when the pack covers every required section AND is faithful
+      to the actual repo. Return strict JSON conforming to the response schema.
+
+  - id: brownfield-mutation-check-1
+    depends_on: [brownfield-review-1]
+    bash: |
+      set -euo pipefail
+      PRE_SHA=$(cat "$ARTIFACTS_DIR/codex-pre-sha-bf1.txt")
+      POST_SHA=$(git rev-parse HEAD)
+      if [ "$PRE_SHA" != "$POST_SHA" ]; then
+        echo "FATAL: Codex created a commit during read-only review (pre=$PRE_SHA post=$POST_SHA)" >&2
+        exit 1
+      fi
+      diff -q "$ARTIFACTS_DIR/codex-pre-status-bf1.txt" <(git status --porcelain) \
+        || { echo "FATAL: Codex modified working tree during read-only review" >&2; exit 1; }
+      echo "ok"
+
+  - id: brownfield-decide-1
+    depends_on: [brownfield-mutation-check-1]
+    bash: |
+      set -euo pipefail
+      VERDICT='$brownfield-review-1.output.verdict'
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/brownfield/attempt-1"
+      printf '%s\n' '$brownfield-review-1.output' > "$RUN_DIR/brownfield/attempt-1/review.json"
+      python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 1 <<'PY'
+      import json, sys, os
+      path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
+      with open(path) as f: state = json.load(f)
+      state["current_gate"] = "BROWNFIELD"
+      state["attempt"] = attempt
+      state["gate_state"] = "APPROVED" if verdict == "APPROVED" else "REVISION_REQUIRED" if verdict == "REJECTED" else "NEEDS_HUMAN"
+      tmp = path + ".tmp"
+      with open(tmp, "w") as f: json.dump(state, f, indent=2)
+      os.replace(tmp, path)
+      PY
+      echo "$VERDICT"
+
+  # --- Attempt 2 (gated: only if attempt 1 not APPROVED) ------------------
+  - id: brownfield-author-2
+    depends_on: [brownfield-decide-1]
+    when: "$brownfield-decide-1.output != 'APPROVED'"
+    provider: claude
+    allowed_tools: [Read, Write, Glob, Grep, Bash]
+    prompt: |
+      Codex rejected attempt 1. Read its review:
+          .factory/runs/$1/brownfield/attempt-1/review.json
+      Address every blocking issue. Do NOT rewrite unrelated sections.
+      Write the revised pack to:
+          .factory/runs/$1/brownfield/attempt-2/artifact.md
+      Also write a one-paragraph revision summary to:
+          .factory/runs/$1/brownfield/attempt-2/revision-summary.md
+      Output "BROWNFIELD_REVISED".
+
+  - id: brownfield-snapshot-2
+    depends_on: [brownfield-author-2]
+    when: "$brownfield-decide-1.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-bf2.txt"
+      git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-bf2.txt"
+      echo ok
+
+  - id: brownfield-review-2
+    depends_on: [brownfield-snapshot-2]
+    when: "$brownfield-decide-1.output != 'APPROVED'"
+    provider: codex
+    output_format: *reviewer-schema
+    prompt: |
+      Read-only review of .factory/runs/$1/brownfield/attempt-2/artifact.md
+      against attempt-1/review.json. Confirm every blocking issue is resolved.
+      Return strict JSON.
+
+  - id: brownfield-mutation-check-2
+    depends_on: [brownfield-review-2]
+    when: "$brownfield-decide-1.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      [ "$(cat "$ARTIFACTS_DIR/codex-pre-sha-bf2.txt")" = "$(git rev-parse HEAD)" ] \
+        || { echo "FATAL: Codex committed during attempt-2 review" >&2; exit 1; }
+      diff -q "$ARTIFACTS_DIR/codex-pre-status-bf2.txt" <(git status --porcelain) \
+        || { echo "FATAL: Codex modified working tree during attempt-2 review" >&2; exit 1; }
+      echo ok
+
+  - id: brownfield-decide-2
+    depends_on: [brownfield-mutation-check-2]
+    when: "$brownfield-decide-1.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      VERDICT='$brownfield-review-2.output.verdict'
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/brownfield/attempt-2"
+      printf '%s\n' '$brownfield-review-2.output' > "$RUN_DIR/brownfield/attempt-2/review.json"
+      python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 2 <<'PY'
+      import json, sys, os
+      path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
+      with open(path) as f: s = json.load(f)
+      s["attempt"] = attempt
+      s["gate_state"] = "APPROVED" if verdict == "APPROVED" else "REVISION_REQUIRED" if verdict == "REJECTED" else "NEEDS_HUMAN"
+      tmp = path + ".tmp"
+      with open(tmp, "w") as f: json.dump(s, f, indent=2)
+      os.replace(tmp, path)
+      PY
+      echo "$VERDICT"
+
+  # --- Attempt 3 (final auto-attempt) ------------------------------------
+  - id: brownfield-author-3
+    depends_on: [brownfield-decide-2]
+    when: "$brownfield-decide-1.output != 'APPROVED' && $brownfield-decide-2.output != 'APPROVED'"
+    provider: claude
+    allowed_tools: [Read, Write, Glob, Grep, Bash]
+    prompt: |
+      Codex rejected both prior attempts. Read both reviews:
+          .factory/runs/$1/brownfield/attempt-2/review.json (latest)
+          .factory/runs/$1/brownfield/attempt-1/review.json (original)
+      This is the FINAL auto-attempt. Address every outstanding blocking issue.
+      If any blocker requires a design decision you cannot make, note it explicitly
+      so the human reviewer can decide at the approval gate.
+      Write to:
+          .factory/runs/$1/brownfield/attempt-3/artifact.md
+      Write a revision summary to:
+          .factory/runs/$1/brownfield/attempt-3/revision-summary.md
+      Output "BROWNFIELD_REVISED".
+
+  - id: brownfield-snapshot-3
+    depends_on: [brownfield-author-3]
+    when: "$brownfield-decide-1.output != 'APPROVED' && $brownfield-decide-2.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-bf3.txt"
+      git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-bf3.txt"
+      echo ok
+
+  - id: brownfield-review-3
+    depends_on: [brownfield-snapshot-3]
+    when: "$brownfield-decide-1.output != 'APPROVED' && $brownfield-decide-2.output != 'APPROVED'"
+    provider: codex
+    output_format: *reviewer-schema
+    prompt: |
+      Final auto-review. Read .factory/runs/$1/brownfield/attempt-3/artifact.md
+      against attempt-2/review.json. This is the last attempt before escalation.
+      Approve only if every blocker from prior reviews is resolved. Return strict JSON.
+
+  - id: brownfield-mutation-check-3
+    depends_on: [brownfield-review-3]
+    when: "$brownfield-decide-1.output != 'APPROVED' && $brownfield-decide-2.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      [ "$(cat "$ARTIFACTS_DIR/codex-pre-sha-bf3.txt")" = "$(git rev-parse HEAD)" ] \
+        || { echo "FATAL: Codex committed during attempt-3 review" >&2; exit 1; }
+      diff -q "$ARTIFACTS_DIR/codex-pre-status-bf3.txt" <(git status --porcelain) \
+        || { echo "FATAL: Codex modified working tree during attempt-3 review" >&2; exit 1; }
+      echo ok
+
+  - id: brownfield-decide-3
+    depends_on: [brownfield-mutation-check-3]
+    when: "$brownfield-decide-1.output != 'APPROVED' && $brownfield-decide-2.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      VERDICT='$brownfield-review-3.output.verdict'
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/brownfield/attempt-3"
+      printf '%s\n' '$brownfield-review-3.output' > "$RUN_DIR/brownfield/attempt-3/review.json"
+      python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 3 <<'PY'
+      import json, sys, os
+      path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
+      with open(path) as f: s = json.load(f)
+      s["attempt"] = attempt
+      s["gate_state"] = "APPROVED" if verdict == "APPROVED" else "REVISION_REQUIRED" if verdict == "REJECTED" else "NEEDS_HUMAN"
+      tmp = path + ".tmp"
+      with open(tmp, "w") as f: json.dump(s, f, indent=2)
+      os.replace(tmp, path)
+      PY
+      echo "$VERDICT"
+
+  # --- Gate verdict + human halt ------------------------------------------
+  - id: brownfield-final
+    depends_on: [brownfield-decide-1, brownfield-decide-2, brownfield-decide-3]
+    trigger_rule: all_done
+    bash: |
+      set -euo pipefail
+      for V in '$brownfield-decide-1.output' '$brownfield-decide-2.output' '$brownfield-decide-3.output'; do
+        if [ "$V" = "APPROVED" ]; then echo "APPROVED"; exit 0; fi
+      done
+      echo "NEEDS_HUMAN"
+
+  - id: brownfield-halt
+    depends_on: [brownfield-final]
+    when: "$brownfield-final.output != 'APPROVED'"
+    approval:
+      message: |
+        BROWNFIELD CONTEXT GATE failed after all auto-attempts for feature "$1".
+        Latest review: .factory/runs/$1/brownfield/attempt-3/review.json
+        Approve to override (use sparingly), or reject with feedback to abort.
+      capture_response: true
+      on_reject:
+        prompt: |
+          The brownfield gate was rejected by the human reviewer with the
+          following note: $REJECTION_REASON
+          Halt. Do not produce more artefacts.
+        max_attempts: 1
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GATE 1 — SPEC  (3 attempts: claude → codex → decide)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # --- Attempt 1 ----------------------------------------------------------
+  - id: spec-author-1
+    depends_on: [brownfield-final]
+    when: "$brownfield-final.output == 'APPROVED'"
+    provider: claude
+    allowed_tools: [Read, Write, Glob, Grep, Bash]
+    prompt: |
+      Read .factory/runs/$1/state/pipeline.json for context and the approved
+      brownfield context pack (highest-numbered attempt) at:
+          .factory/runs/$1/brownfield/
+
+      Author the feature specification for: $ARGUMENTS
+
+      The spec MUST cover:
+        • Objective and scope — what the feature does and explicitly does NOT do
+        • Functional requirements — every requirement must be clear and independently testable
+        • Non-functional requirements — performance, security, reliability, observability
+        • Acceptance criteria — measurable, linkable to a specific test
+        • Non-goals — explicit list of out-of-scope items
+        • Security implications — authentication, authorisation, data sensitivity,
+          new attack surface, third-party dependencies
+        • Brownfield constraints respected — no rewrite of areas flagged as protected
+        • Open design decisions — list any unresolved choices with the options considered
+
+      Write to BOTH:
+          .specify/spec.md
+          .factory/runs/$1/spec/attempt-1/artifact.md
+      Output "SPEC_DRAFTED" when done.
+
+  - id: spec-snapshot-1
+    depends_on: [spec-author-1]
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-sp1.txt"
+      git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-sp1.txt"
+      echo ok
+
+  - id: spec-review-1
+    depends_on: [spec-snapshot-1]
+    provider: codex
+    output_format: *reviewer-schema
+    prompt: |
+      You are the REVIEWER. Read-only. Do not Write, Edit, or modify any file.
+      Read:
+          .factory/runs/$1/spec/attempt-1/artifact.md
+          .factory/runs/$1/brownfield/attempt-*/artifact.md (highest-numbered)
+
+      Approve only when ALL of the following hold:
+        • Every requirement is clear, unambiguous, and independently testable
+        • Non-goals are explicit and cover the obvious adjacent scope risks
+        • Acceptance criteria are measurable and linkable to a specific test
+        • Security implications are addressed (auth, data sensitivity, attack surface)
+        • Brownfield constraints from the context pack are respected
+        • Open design decisions are either resolved or explicitly escalated with options
+      Return strict JSON only.
+
+  - id: spec-mutation-check-1
+    depends_on: [spec-review-1]
+    bash: |
+      set -euo pipefail
+      [ "$(cat "$ARTIFACTS_DIR/codex-pre-sha-sp1.txt")" = "$(git rev-parse HEAD)" ] \
+        || { echo "FATAL: Codex committed during spec review" >&2; exit 1; }
+      diff -q "$ARTIFACTS_DIR/codex-pre-status-sp1.txt" <(git status --porcelain) \
+        || { echo "FATAL: Codex modified working tree during spec review" >&2; exit 1; }
+      echo ok
+
+  - id: spec-decide-1
+    depends_on: [spec-mutation-check-1]
+    bash: |
+      set -euo pipefail
+      VERDICT='$spec-review-1.output.verdict'
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/spec/attempt-1"
+      printf '%s\n' '$spec-review-1.output' > "$RUN_DIR/spec/attempt-1/review.json"
+      python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 1 <<'PY'
+      import json, sys, os
+      path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
+      with open(path) as f: s = json.load(f)
+      s["current_gate"] = "SPEC"
+      s["attempt"] = attempt
+      s["gate_state"] = "APPROVED" if verdict == "APPROVED" else "REVISION_REQUIRED" if verdict == "REJECTED" else "NEEDS_HUMAN"
+      tmp = path + ".tmp"
+      with open(tmp, "w") as f: json.dump(s, f, indent=2)
+      os.replace(tmp, path)
+      PY
+      echo "$VERDICT"
+
+  # --- Attempt 2 ----------------------------------------------------------
+  - id: spec-author-2
+    depends_on: [spec-decide-1]
+    when: "$spec-decide-1.output != 'APPROVED'"
+    provider: claude
+    allowed_tools: [Read, Write, Glob, Grep, Bash]
+    prompt: |
+      Codex rejected the spec. Read the review:
+          .factory/runs/$1/spec/attempt-1/review.json
+      Address every blocking issue. Do NOT rewrite passing sections.
+      Update .specify/spec.md in place and write to:
+          .factory/runs/$1/spec/attempt-2/artifact.md
+      Write a revision summary to:
+          .factory/runs/$1/spec/attempt-2/revision-summary.md
+      Output "SPEC_REVISED".
+
+  - id: spec-snapshot-2
+    depends_on: [spec-author-2]
+    when: "$spec-decide-1.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-sp2.txt"
+      git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-sp2.txt"
+      echo ok
+
+  - id: spec-review-2
+    depends_on: [spec-snapshot-2]
+    when: "$spec-decide-1.output != 'APPROVED'"
+    provider: codex
+    output_format: *reviewer-schema
+    prompt: |
+      Read-only review of .factory/runs/$1/spec/attempt-2/artifact.md against
+      attempt-1/review.json. Confirm every blocking issue is resolved. Return strict JSON.
+
+  - id: spec-mutation-check-2
+    depends_on: [spec-review-2]
+    when: "$spec-decide-1.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      [ "$(cat "$ARTIFACTS_DIR/codex-pre-sha-sp2.txt")" = "$(git rev-parse HEAD)" ] \
+        || { echo "FATAL: Codex committed during spec attempt-2 review" >&2; exit 1; }
+      diff -q "$ARTIFACTS_DIR/codex-pre-status-sp2.txt" <(git status --porcelain) \
+        || { echo "FATAL: Codex modified working tree during spec attempt-2 review" >&2; exit 1; }
+      echo ok
+
+  - id: spec-decide-2
+    depends_on: [spec-mutation-check-2]
+    when: "$spec-decide-1.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      VERDICT='$spec-review-2.output.verdict'
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/spec/attempt-2"
+      printf '%s\n' '$spec-review-2.output' > "$RUN_DIR/spec/attempt-2/review.json"
+      python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 2 <<'PY'
+      import json, sys, os
+      path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
+      with open(path) as f: s = json.load(f)
+      s["current_gate"] = "SPEC"
+      s["attempt"] = attempt
+      s["gate_state"] = "APPROVED" if verdict == "APPROVED" else "REVISION_REQUIRED" if verdict == "REJECTED" else "NEEDS_HUMAN"
+      tmp = path + ".tmp"
+      with open(tmp, "w") as f: json.dump(s, f, indent=2)
+      os.replace(tmp, path)
+      PY
+      echo "$VERDICT"
+
+  # --- Attempt 3 ----------------------------------------------------------
+  - id: spec-author-3
+    depends_on: [spec-decide-2]
+    when: "$spec-decide-1.output != 'APPROVED' && $spec-decide-2.output != 'APPROVED'"
+    provider: claude
+    allowed_tools: [Read, Write, Glob, Grep, Bash]
+    prompt: |
+      Codex rejected both prior spec attempts. Read both reviews:
+          .factory/runs/$1/spec/attempt-2/review.json (latest)
+          .factory/runs/$1/spec/attempt-1/review.json (original)
+      This is the FINAL auto-attempt. Address every outstanding blocker.
+      If any blocker requires a design decision you cannot make, note it explicitly
+      for the human reviewer at the approval gate.
+      Update .specify/spec.md and write to:
+          .factory/runs/$1/spec/attempt-3/artifact.md
+      Write a revision summary to:
+          .factory/runs/$1/spec/attempt-3/revision-summary.md
+      Output "SPEC_REVISED".
+
+  - id: spec-snapshot-3
+    depends_on: [spec-author-3]
+    when: "$spec-decide-1.output != 'APPROVED' && $spec-decide-2.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-sp3.txt"
+      git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-sp3.txt"
+      echo ok
+
+  - id: spec-review-3
+    depends_on: [spec-snapshot-3]
+    when: "$spec-decide-1.output != 'APPROVED' && $spec-decide-2.output != 'APPROVED'"
+    provider: codex
+    output_format: *reviewer-schema
+    prompt: |
+      Final auto-review. Read .factory/runs/$1/spec/attempt-3/artifact.md against
+      attempt-2/review.json. This is the last attempt before escalation.
+      Approve only if every blocker from prior reviews is resolved. Return strict JSON.
+
+  - id: spec-mutation-check-3
+    depends_on: [spec-review-3]
+    when: "$spec-decide-1.output != 'APPROVED' && $spec-decide-2.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      [ "$(cat "$ARTIFACTS_DIR/codex-pre-sha-sp3.txt")" = "$(git rev-parse HEAD)" ] \
+        || { echo "FATAL: Codex committed during spec attempt-3 review" >&2; exit 1; }
+      diff -q "$ARTIFACTS_DIR/codex-pre-status-sp3.txt" <(git status --porcelain) \
+        || { echo "FATAL: Codex modified working tree during spec attempt-3 review" >&2; exit 1; }
+      echo ok
+
+  - id: spec-decide-3
+    depends_on: [spec-mutation-check-3]
+    when: "$spec-decide-1.output != 'APPROVED' && $spec-decide-2.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      VERDICT='$spec-review-3.output.verdict'
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/spec/attempt-3"
+      printf '%s\n' '$spec-review-3.output' > "$RUN_DIR/spec/attempt-3/review.json"
+      python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 3 <<'PY'
+      import json, sys, os
+      path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
+      with open(path) as f: s = json.load(f)
+      s["current_gate"] = "SPEC"
+      s["attempt"] = attempt
+      s["gate_state"] = "APPROVED" if verdict == "APPROVED" else "REVISION_REQUIRED" if verdict == "REJECTED" else "NEEDS_HUMAN"
+      tmp = path + ".tmp"
+      with open(tmp, "w") as f: json.dump(s, f, indent=2)
+      os.replace(tmp, path)
+      PY
+      echo "$VERDICT"
+
+  # --- Gate verdict + human halt ------------------------------------------
+  - id: spec-final
+    depends_on: [spec-decide-1, spec-decide-2, spec-decide-3]
+    trigger_rule: all_done
+    bash: |
+      set -euo pipefail
+      for V in '$spec-decide-1.output' '$spec-decide-2.output' '$spec-decide-3.output'; do
+        if [ "$V" = "APPROVED" ]; then echo "APPROVED"; exit 0; fi
+      done
+      echo "NEEDS_HUMAN"
+
+  - id: spec-halt
+    depends_on: [spec-final]
+    when: "$spec-final.output != 'APPROVED'"
+    approval:
+      message: |
+        SPEC GATE failed after all auto-attempts for feature "$1".
+        Latest review: .factory/runs/$1/spec/attempt-3/review.json
+        Current spec: .specify/spec.md
+        Approve to override (use sparingly), or reject with feedback to abort.
+      capture_response: true
+      on_reject:
+        prompt: |
+          The spec gate was rejected by the human reviewer with the
+          following note: $REJECTION_REASON
+          Halt. Do not produce more artefacts.
+        max_attempts: 1
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GATE 2 — PLAN  (3 attempts: claude → codex → decide)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # --- Attempt 1 ----------------------------------------------------------
+  - id: plan-author-1
+    depends_on: [spec-final]
+    when: "$spec-final.output == 'APPROVED'"
+    provider: claude
+    allowed_tools: [Read, Write, Glob, Grep, Bash]
+    prompt: |
+      Read the approved spec at .specify/spec.md and the brownfield context at
+      .factory/runs/$1/brownfield/. Author the implementation plan.
+
+      The plan MUST cover:
+        • Ordered implementation steps — concrete, executable, small enough to commit atomically
+        • Traceability — each step references the spec requirement(s) it satisfies
+        • Test strategy — unit tests, integration tests, and how to run them
+        • Rollback plan — how to revert safely if a step fails in production
+        • Scope boundary — no changes to areas not required by the spec
+        • File-level change map — which files/modules are created, modified, or deleted
+
+      Write to BOTH:
+          .specify/plan.md
+          .factory/runs/$1/plan/attempt-1/artifact.md
+      Output "PLAN_DRAFTED" when done.
+
+  - id: plan-snapshot-1
+    depends_on: [plan-author-1]
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-pl1.txt"
+      git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-pl1.txt"
+      echo ok
+
+  - id: plan-review-1
+    depends_on: [plan-snapshot-1]
+    provider: codex
+    output_format: *reviewer-schema
+    prompt: |
+      You are the REVIEWER. Read-only. Do not Write, Edit, or modify any file.
+      Read:
+          .factory/runs/$1/plan/attempt-1/artifact.md
+          .specify/spec.md
+
+      Approve only when ALL of the following hold:
+        • Every implementation step is concrete and executable as written
+        • Each step traces to one or more spec requirements
+        • Test strategy covers the acceptance criteria in the spec
+        • A rollback plan exists for each irreversible step
+        • No out-of-spec scope is introduced
+        • The file-level change map is complete and consistent with the steps
+      Return strict JSON only.
+
+  - id: plan-mutation-check-1
+    depends_on: [plan-review-1]
+    bash: |
+      set -euo pipefail
+      [ "$(cat "$ARTIFACTS_DIR/codex-pre-sha-pl1.txt")" = "$(git rev-parse HEAD)" ] \
+        || { echo "FATAL: Codex committed during plan review" >&2; exit 1; }
+      diff -q "$ARTIFACTS_DIR/codex-pre-status-pl1.txt" <(git status --porcelain) \
+        || { echo "FATAL: Codex modified working tree during plan review" >&2; exit 1; }
+      echo ok
+
+  - id: plan-decide-1
+    depends_on: [plan-mutation-check-1]
+    bash: |
+      set -euo pipefail
+      VERDICT='$plan-review-1.output.verdict'
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/plan/attempt-1"
+      printf '%s\n' '$plan-review-1.output' > "$RUN_DIR/plan/attempt-1/review.json"
+      python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 1 <<'PY'
+      import json, sys, os
+      path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
+      with open(path) as f: s = json.load(f)
+      s["current_gate"] = "PLAN"
+      s["attempt"] = attempt
+      s["gate_state"] = "APPROVED" if verdict == "APPROVED" else "REVISION_REQUIRED" if verdict == "REJECTED" else "NEEDS_HUMAN"
+      tmp = path + ".tmp"
+      with open(tmp, "w") as f: json.dump(s, f, indent=2)
+      os.replace(tmp, path)
+      PY
+      echo "$VERDICT"
+
+  # --- Attempt 2 ----------------------------------------------------------
+  - id: plan-author-2
+    depends_on: [plan-decide-1]
+    when: "$plan-decide-1.output != 'APPROVED'"
+    provider: claude
+    allowed_tools: [Read, Write, Glob, Grep, Bash]
+    prompt: |
+      Codex rejected the plan. Read the review:
+          .factory/runs/$1/plan/attempt-1/review.json
+      Address every blocking issue. Do NOT expand scope.
+      Update .specify/plan.md in place and write to:
+          .factory/runs/$1/plan/attempt-2/artifact.md
+      Write a revision summary to:
+          .factory/runs/$1/plan/attempt-2/revision-summary.md
+      Output "PLAN_REVISED".
+
+  - id: plan-snapshot-2
+    depends_on: [plan-author-2]
+    when: "$plan-decide-1.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-pl2.txt"
+      git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-pl2.txt"
+      echo ok
+
+  - id: plan-review-2
+    depends_on: [plan-snapshot-2]
+    when: "$plan-decide-1.output != 'APPROVED'"
+    provider: codex
+    output_format: *reviewer-schema
+    prompt: |
+      Read-only review of .factory/runs/$1/plan/attempt-2/artifact.md against
+      attempt-1/review.json. Confirm every blocking issue is resolved. Return strict JSON.
+
+  - id: plan-mutation-check-2
+    depends_on: [plan-review-2]
+    when: "$plan-decide-1.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      [ "$(cat "$ARTIFACTS_DIR/codex-pre-sha-pl2.txt")" = "$(git rev-parse HEAD)" ] \
+        || { echo "FATAL: Codex committed during plan attempt-2 review" >&2; exit 1; }
+      diff -q "$ARTIFACTS_DIR/codex-pre-status-pl2.txt" <(git status --porcelain) \
+        || { echo "FATAL: Codex modified working tree during plan attempt-2 review" >&2; exit 1; }
+      echo ok
+
+  - id: plan-decide-2
+    depends_on: [plan-mutation-check-2]
+    when: "$plan-decide-1.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      VERDICT='$plan-review-2.output.verdict'
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/plan/attempt-2"
+      printf '%s\n' '$plan-review-2.output' > "$RUN_DIR/plan/attempt-2/review.json"
+      python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 2 <<'PY'
+      import json, sys, os
+      path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
+      with open(path) as f: s = json.load(f)
+      s["current_gate"] = "PLAN"
+      s["attempt"] = attempt
+      s["gate_state"] = "APPROVED" if verdict == "APPROVED" else "REVISION_REQUIRED" if verdict == "REJECTED" else "NEEDS_HUMAN"
+      tmp = path + ".tmp"
+      with open(tmp, "w") as f: json.dump(s, f, indent=2)
+      os.replace(tmp, path)
+      PY
+      echo "$VERDICT"
+
+  # --- Attempt 3 ----------------------------------------------------------
+  - id: plan-author-3
+    depends_on: [plan-decide-2]
+    when: "$plan-decide-1.output != 'APPROVED' && $plan-decide-2.output != 'APPROVED'"
+    provider: claude
+    allowed_tools: [Read, Write, Glob, Grep, Bash]
+    prompt: |
+      Codex rejected both prior plan attempts. Read both reviews:
+          .factory/runs/$1/plan/attempt-2/review.json (latest)
+          .factory/runs/$1/plan/attempt-1/review.json (original)
+      This is the FINAL auto-attempt. Address every outstanding blocker.
+      If any blocker requires a decision you cannot make, note it explicitly.
+      Update .specify/plan.md and write to:
+          .factory/runs/$1/plan/attempt-3/artifact.md
+      Write a revision summary to:
+          .factory/runs/$1/plan/attempt-3/revision-summary.md
+      Output "PLAN_REVISED".
+
+  - id: plan-snapshot-3
+    depends_on: [plan-author-3]
+    when: "$plan-decide-1.output != 'APPROVED' && $plan-decide-2.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-pl3.txt"
+      git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-pl3.txt"
+      echo ok
+
+  - id: plan-review-3
+    depends_on: [plan-snapshot-3]
+    when: "$plan-decide-1.output != 'APPROVED' && $plan-decide-2.output != 'APPROVED'"
+    provider: codex
+    output_format: *reviewer-schema
+    prompt: |
+      Final auto-review. Read .factory/runs/$1/plan/attempt-3/artifact.md against
+      attempt-2/review.json. This is the last attempt before escalation.
+      Approve only if every blocker from prior reviews is resolved. Return strict JSON.
+
+  - id: plan-mutation-check-3
+    depends_on: [plan-review-3]
+    when: "$plan-decide-1.output != 'APPROVED' && $plan-decide-2.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      [ "$(cat "$ARTIFACTS_DIR/codex-pre-sha-pl3.txt")" = "$(git rev-parse HEAD)" ] \
+        || { echo "FATAL: Codex committed during plan attempt-3 review" >&2; exit 1; }
+      diff -q "$ARTIFACTS_DIR/codex-pre-status-pl3.txt" <(git status --porcelain) \
+        || { echo "FATAL: Codex modified working tree during plan attempt-3 review" >&2; exit 1; }
+      echo ok
+
+  - id: plan-decide-3
+    depends_on: [plan-mutation-check-3]
+    when: "$plan-decide-1.output != 'APPROVED' && $plan-decide-2.output != 'APPROVED'"
+    bash: |
+      set -euo pipefail
+      VERDICT='$plan-review-3.output.verdict'
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/plan/attempt-3"
+      printf '%s\n' '$plan-review-3.output' > "$RUN_DIR/plan/attempt-3/review.json"
+      python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 3 <<'PY'
+      import json, sys, os
+      path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
+      with open(path) as f: s = json.load(f)
+      s["current_gate"] = "PLAN"
+      s["attempt"] = attempt
+      s["gate_state"] = "APPROVED" if verdict == "APPROVED" else "REVISION_REQUIRED" if verdict == "REJECTED" else "NEEDS_HUMAN"
+      tmp = path + ".tmp"
+      with open(tmp, "w") as f: json.dump(s, f, indent=2)
+      os.replace(tmp, path)
+      PY
+      echo "$VERDICT"
+
+  # --- Gate verdict + human halt ------------------------------------------
+  - id: plan-final
+    depends_on: [plan-decide-1, plan-decide-2, plan-decide-3]
+    trigger_rule: all_done
+    bash: |
+      set -euo pipefail
+      for V in '$plan-decide-1.output' '$plan-decide-2.output' '$plan-decide-3.output'; do
+        if [ "$V" = "APPROVED" ]; then echo "APPROVED"; exit 0; fi
+      done
+      echo "NEEDS_HUMAN"
+
+  - id: plan-halt
+    depends_on: [plan-final]
+    when: "$plan-final.output != 'APPROVED'"
+    approval:
+      message: |
+        PLAN GATE failed after all auto-attempts for feature "$1".
+        Latest review: .factory/runs/$1/plan/attempt-3/review.json
+        Current plan: .specify/plan.md
+        Approve to override (use sparingly), or reject with feedback to abort.
+      capture_response: true
+      on_reject:
+        prompt: |
+          The plan gate was rejected by the human reviewer with the
+          following note: $REJECTION_REASON
+          Halt. Do not produce more artefacts.
+        max_attempts: 1
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GATE 3+4 — CODE: implement → quality → review
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: code-implement-1
+    depends_on: [plan-final, plan-halt]
+    trigger_rule: one_success
+    model: opus[1m]
+    allowed_tools: [Read, Write, Edit, Glob, Grep, Bash]
+    prompt: |
+      Implement the approved plan (.specify/plan.md) for feature $1.
+      Stay strictly inside the approved spec and plan.
+      Commit each logical chunk: `git add -A && git commit -m "feat($1): …"`
+      When implementation is complete, output "CODE_IMPLEMENTED".
+
+  - id: quality-1
+    depends_on: [code-implement-1]
+    bash: |
+      set -euo pipefail
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/code/attempt-1"
+      LOG="$RUN_DIR/code/attempt-1/quality.log"
+
+      # Detect quality command. Prefer `make quality`; fall back to bun run validate.
+      if make -n quality >/dev/null 2>&1; then
+        CMD="make quality"
+      elif command -v bun >/dev/null && grep -q '"validate"' package.json 2>/dev/null; then
+        CMD="bun run validate"
+      else
+        echo "QUALITY_INFRASTRUCTURE_MISSING" | tee "$LOG"
+        echo "QUALITY_INFRASTRUCTURE_MISSING"; exit 0
+      fi
+
+      echo "+ $CMD" | tee "$LOG"
+      if $CMD 2>&1 | tee -a "$LOG"; then echo "QUALITY_PASS"
+      else echo "QUALITY_FAIL"
+      fi
+    timeout: 600000
+
+  - id: code-quality-fix-loop
+    depends_on: [quality-1]
+    when: "$quality-1.output == 'QUALITY_FAIL'"
+    model: opus[1m]
+    loop:
+      prompt: |
+        The quality gate failed. Read the latest quality log under
+        .factory/runs/$1/code/attempt-*/quality.log and fix the failures.
+        Re-run the same command yourself; once it passes, commit and
+        output "QUALITY_FIXED".
+      until: QUALITY_FIXED
+      max_iterations: 3
+      until_bash: |
+        if make -n quality >/dev/null 2>&1; then make quality
+        else bun run validate
+        fi
+
+  # --- Codex code review (with mutation guard) ----------------------------
+  - id: code-review-snapshot
+    depends_on: [quality-1, code-quality-fix-loop]
+    trigger_rule: none_failed_min_one_success
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-cr.txt"
+      git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-cr.txt"
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/code/attempt-1"
+      # Use $BASE_BRANCH unquoted so Archon's substitution ('main') concatenates
+      # cleanly with ..HEAD as a single git range argument.
+      git diff $BASE_BRANCH..HEAD > "$RUN_DIR/code/attempt-1/diff.patch" \
+        || git diff HEAD~1 HEAD > "$RUN_DIR/code/attempt-1/diff.patch"
+      echo ok
+
+  - id: code-review-1
+    depends_on: [code-review-snapshot]
+    provider: codex
+    output_format: *reviewer-schema
+    prompt: |
+      You are the REVIEWER. Read-only. Read the approved brownfield/spec/plan
+      and the diff at .factory/runs/$1/code/attempt-1/diff.patch. Read the
+      quality log at .factory/runs/$1/code/attempt-1/quality.log. Confirm:
+        • Implementation matches the approved spec and plan
+        • No unapproved scope is introduced
+        • Tests are meaningful (not just coverage padding)
+        • Error handling is adequate
+        • Security-sensitive paths are handled correctly
+        • Quality checks pass (infer from the log)
+        • Existing behaviour is not regressed
+      Return strict JSON only.
+
+  - id: code-review-mutation-check
+    depends_on: [code-review-1]
+    bash: |
+      set -euo pipefail
+      [ "$(cat "$ARTIFACTS_DIR/codex-pre-sha-cr.txt")" = "$(git rev-parse HEAD)" ] \
+        || { echo "FATAL: Codex committed during code review" >&2; exit 1; }
+      diff -q "$ARTIFACTS_DIR/codex-pre-status-cr.txt" <(git status --porcelain) \
+        || { echo "FATAL: Codex modified working tree during code review" >&2; exit 1; }
+      RUN_DIR=".factory/runs/$1"
+      mkdir -p "$RUN_DIR/code/attempt-1"
+      printf '%s\n' '$code-review-1.output' > "$RUN_DIR/code/attempt-1/review.json"
+      echo ok
+
+  - id: code-review-fix-loop
+    depends_on: [code-review-mutation-check]
+    when: "$code-review-1.output.verdict == 'REJECTED'"
+    model: opus[1m]
+    loop:
+      prompt: |
+        Codex rejected the code review. Read:
+            .factory/runs/$1/code/attempt-1/review.json
+        Address every blocking issue, run quality locally, commit, and output
+        "CODE_REVIEW_FIXED". Do NOT expand scope; if the feedback requires
+        design judgement, output "NEEDS_HUMAN" instead.
+      until: CODE_REVIEW_FIXED
+      max_iterations: 3
+
+  # --- Final gate halt for code ------------------------------------------
+  - id: code-final
+    depends_on: [code-review-mutation-check, code-review-fix-loop]
+    trigger_rule: all_done
+    bash: |
+      set -euo pipefail
+      VERDICT='$code-review-1.output.verdict'
+      [ "$VERDICT" = "APPROVED" ] && echo "APPROVED" || echo "NEEDS_HUMAN"
+
+  - id: code-halt
+    depends_on: [code-final]
+    when: "$code-final.output != 'APPROVED'"
+    approval:
+      message: |
+        CODE GATE failed for feature "$1" after auto-fix attempts.
+        Latest review: .factory/runs/$1/code/attempt-1/review.json
+        Diff: .factory/runs/$1/code/attempt-1/diff.patch
+        Approve to merge anyway (override), or reject to abort.
+      capture_response: true
+      on_reject:
+        prompt: |
+          Human reviewer rejected the override with: $REJECTION_REASON
+          Halt.
+        max_attempts: 1
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # FINALISE
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: finalise
+    depends_on: [code-final, code-halt]
+    trigger_rule: one_success
+    bash: |
+      set -euo pipefail
+      git status --short
+      git log --oneline -10
+      echo "Pipeline complete for feature $1"
