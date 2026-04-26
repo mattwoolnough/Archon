@@ -254,6 +254,90 @@ Archon ships 17 default workflows - run `archon workflow list` or describe what 
 
 See [Authoring Workflows](https://archon.diy/guides/authoring-workflows/) and [Authoring Commands](https://archon.diy/guides/authoring-commands/).
 
+## Workflow Configuration
+
+### Claude SDK options
+
+Set Claude-specific options at the workflow level and they apply to every Claude node unless overridden per-node:
+
+```yaml
+name: my-workflow
+description: Example with Claude SDK options
+effort: high          # low | medium | high | max
+thinking:             # extended thinking budget
+  type: enabled
+  budgetTokens: 8000
+fallbackModel: haiku  # model to use if primary is unavailable
+betas:
+  - interleaved-thinking-2025-05-14
+sandbox:
+  enabled: true
+
+nodes:
+  - id: plan
+    prompt: "Plan the implementation"
+
+  - id: implement
+    depends_on: [plan]
+    effort: max         # per-node override — takes precedence
+    prompt: "Implement the plan"
+```
+
+### Codex workflow-level config
+
+Set Codex reasoning and search options at the workflow level and they flow through to every Codex node in the run, overriding `.archon/config.yaml` assistant defaults:
+
+```yaml
+name: codex-workflow
+description: Workflow with Codex config
+provider: codex
+modelReasoningEffort: high   # minimal | low | medium | high | xhigh
+webSearchMode: live          # disabled | cached | live
+additionalDirectories:
+  - /path/to/other/repo
+
+nodes:
+  - id: analyze
+    prompt: "Analyze the codebase and suggest improvements"
+```
+
+### Deterministic gates
+
+Hard review gates use structured reviewer output, a bash validation node, and token-based branching — so code decides whether the workflow advances, not raw model prose:
+
+```yaml
+- id: spec-review
+  output_format:
+    type: object
+    required: [verdict, blocking_issues]
+    properties:
+      verdict: { type: string, enum: [APPROVED, REJECTED, NEEDS_HUMAN] }
+      blocking_issues: { type: array, items: { type: object } }
+  prompt: "Review the spec. Return strict JSON only."
+
+- id: spec-validate
+  depends_on: [spec-review]
+  bash: |
+    python3 - <<'PY'
+    import json, sys
+    raw = $spec-review.output
+    # ... validate and print GATE_APPROVED | GATE_REJECTED | GATE_INVALID
+    PY
+
+- id: continue
+  depends_on: [spec-validate]
+  when: "$spec-validate.output == 'GATE_APPROVED'"
+  prompt: "Proceed with implementation."
+
+- id: halt
+  depends_on: [spec-validate]
+  when: "$spec-validate.output != 'GATE_APPROVED'"
+  approval:
+    message: "Gate did not approve — review before continuing."
+```
+
+See the [Deterministic Gates guide](https://archon.diy/guides/deterministic-gates/) for the full pattern including the validation script, loop policy, and a complete end-to-end example.
+
 ## Add a Platform
 
 The Web UI and CLI work out of the box. Optionally connect a chat platform for remote access:
@@ -309,6 +393,7 @@ Full documentation is available at **[archon.diy](https://archon.diy)**.
 | [CLI Reference](https://archon.diy/reference/cli/) | Full CLI reference |
 | [Authoring Workflows](https://archon.diy/guides/authoring-workflows/) | Create custom YAML workflows |
 | [Authoring Commands](https://archon.diy/guides/authoring-commands/) | Create reusable AI commands |
+| [Deterministic Gates](https://archon.diy/guides/deterministic-gates/) | Fail-closed review gates using structured output and bash validation |
 | [Configuration](https://archon.diy/reference/configuration/) | All config options, env vars, YAML settings |
 | [AI Assistants](https://archon.diy/getting-started/ai-assistants/) | Claude, Codex, and Pi setup details |
 | [Deployment](https://archon.diy/deployment/) | Docker, VPS, production setup |
