@@ -908,6 +908,12 @@ async function executeNodeInternal(
             `Node '${node.id}' exceeded cost cap${cap !== undefined ? ` of $${cap.toFixed(2)}` : ''}.`
           );
         }
+        // The Claude SDK marks stop_sequence completions as is_error with
+        // errorSubtype 'success'. The model finished its task and emitted a stop
+        // sequence — treat as a clean completion, not a failure.
+        if (msg.isError && msg.errorSubtype === 'success') {
+          break;
+        }
         // Fail loudly on any other SDK error result. Previously we broke out of
         // the stream silently, producing empty/partial output without signaling
         // failure — which let failed iterations masquerade as successes (#1208).
@@ -1873,6 +1879,11 @@ async function executeLoopNode(
           if (msg.stopReason !== undefined) loopFinalStopReason = msg.stopReason;
           if (msg.numTurns !== undefined) {
             loopTotalNumTurns = (loopTotalNumTurns ?? 0) + msg.numTurns;
+          }
+          // The Claude SDK marks stop_sequence completions as is_error with
+          // errorSubtype 'success' — treat as a clean iteration completion.
+          if (msg.isError && msg.errorSubtype === 'success') {
+            break;
           }
           // Fail the iteration loudly on SDK error results. Previously we broke
           // silently, producing empty output and continuing to the next iteration —
