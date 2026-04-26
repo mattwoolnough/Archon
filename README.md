@@ -208,6 +208,46 @@ The coding agent handles workflow selection, branch naming, and worktree isolati
 
 > **Important:** Always run Claude Code from your target repo, not from the Archon repo. The setup wizard copies the Archon skill into your project so it works from there.
 
+## Deploying from this Fork
+
+This fork is not published to any container registry, so you build the image locally from source.
+
+**Prerequisites:** Docker + Docker Compose, Git (SSH access to the fork), and a Claude Code OAuth token.
+
+```bash
+# 1. Clone
+git clone git@github.com:mattwoolnough/Archon.git
+cd Archon
+
+# 2. Configure
+cp .env.example .env
+# Edit .env — required fields:
+#   CLAUDE_USE_GLOBAL_AUTH=true   (or set CLAUDE_CODE_OAUTH_TOKEN)
+#   GH_TOKEN=<github-personal-access-token>
+
+# 3. Build and start (SQLite, port 3000)
+docker compose up -d --build
+
+# With PostgreSQL
+docker compose --profile with-db up -d --build
+
+# With PostgreSQL + automatic HTTPS (set DOMAIN= in .env first)
+docker compose --profile with-db --profile cloud up -d --build
+```
+
+The web UI is available at `http://localhost:3000` (or `https://<DOMAIN>` with the cloud profile).
+
+**Pulling updates from the fork:**
+
+```bash
+git pull
+docker compose up -d --build   # rebuilds the image in place
+```
+
+**Data persistence:** Archon stores its database, worktrees, and artifacts in the `archon_data` Docker volume (or `ARCHON_DATA=<host-path>` if set in `.env`). Data survives container rebuilds and upgrades.
+
+See the full [Docker deployment guide](https://archon.diy/deployment/docker/) for HTTPS setup, auth, PostgreSQL config, and troubleshooting.
+
 ## Web UI
 
 Archon includes a web dashboard for chatting with your coding agent, running workflows, and monitoring activity. Binary installs: run `archon serve` to download and start the web UI in one step. From source: ask your coding agent to run the frontend from the Archon repo, or run `bun run dev` from the repo root yourself.
