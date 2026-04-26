@@ -55,6 +55,10 @@ nodes:
         echo "ERROR: first argument must be a feature-id (kebab-case slug)" >&2
         exit 1
       fi
+      if ! echo "$FEATURE_ID" | grep -qE '^[a-zA-Z][a-zA-Z0-9-]*$'; then
+        echo "ERROR: feature-id must be a kebab-case slug (letters/numbers/hyphens, must start with a letter): $FEATURE_ID" >&2
+        exit 1
+      fi
       if [ "$FEATURE_ID" = "$ALL_ARGS" ]; then
         echo "ERROR: objective is required after the feature-id" >&2
         exit 1
@@ -75,7 +79,7 @@ nodes:
 
       cat > "$RUN_DIR/state/pipeline.json.tmp" <<JSON
       {
-        "feature_id": "$FEATURE_ID",
+        "feature_id": $(printf '%s' "$FEATURE_ID" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
         "objective": $(printf '%s' "$OBJECTIVE" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
         "current_gate": "BROWNFIELD",
         "gate_state": "DRAFTING",
@@ -185,7 +189,7 @@ nodes:
       VERDICT='$brownfield-review-1.output.verdict'
       RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/brownfield/attempt-1"
-      printf '%s\n' '$brownfield-review-1.output' > "$RUN_DIR/brownfield/attempt-1/review.json"
+      printf '%s\n' $brownfield-review-1.output > "$RUN_DIR/brownfield/attempt-1/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 1 <<'PY'
       import json, sys, os
       path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -254,7 +258,7 @@ nodes:
       VERDICT='$brownfield-review-2.output.verdict'
       RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/brownfield/attempt-2"
-      printf '%s\n' '$brownfield-review-2.output' > "$RUN_DIR/brownfield/attempt-2/review.json"
+      printf '%s\n' $brownfield-review-2.output > "$RUN_DIR/brownfield/attempt-2/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 2 <<'PY'
       import json, sys, os
       path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -323,7 +327,7 @@ nodes:
       VERDICT='$brownfield-review-3.output.verdict'
       RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/brownfield/attempt-3"
-      printf '%s\n' '$brownfield-review-3.output' > "$RUN_DIR/brownfield/attempt-3/review.json"
+      printf '%s\n' $brownfield-review-3.output > "$RUN_DIR/brownfield/attempt-3/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 3 <<'PY'
       import json, sys, os
       path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -440,7 +444,7 @@ nodes:
       VERDICT='$spec-review-1.output.verdict'
       RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/spec/attempt-1"
-      printf '%s\n' '$spec-review-1.output' > "$RUN_DIR/spec/attempt-1/review.json"
+      printf '%s\n' $spec-review-1.output > "$RUN_DIR/spec/attempt-1/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 1 <<'PY'
       import json, sys, os
       path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -508,7 +512,7 @@ nodes:
       VERDICT='$spec-review-2.output.verdict'
       RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/spec/attempt-2"
-      printf '%s\n' '$spec-review-2.output' > "$RUN_DIR/spec/attempt-2/review.json"
+      printf '%s\n' $spec-review-2.output > "$RUN_DIR/spec/attempt-2/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 2 <<'PY'
       import json, sys, os
       path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -578,7 +582,7 @@ nodes:
       VERDICT='$spec-review-3.output.verdict'
       RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/spec/attempt-3"
-      printf '%s\n' '$spec-review-3.output' > "$RUN_DIR/spec/attempt-3/review.json"
+      printf '%s\n' $spec-review-3.output > "$RUN_DIR/spec/attempt-3/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 3 <<'PY'
       import json, sys, os
       path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -691,7 +695,7 @@ nodes:
       VERDICT='$plan-review-1.output.verdict'
       RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/plan/attempt-1"
-      printf '%s\n' '$plan-review-1.output' > "$RUN_DIR/plan/attempt-1/review.json"
+      printf '%s\n' $plan-review-1.output > "$RUN_DIR/plan/attempt-1/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 1 <<'PY'
       import json, sys, os
       path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -759,7 +763,7 @@ nodes:
       VERDICT='$plan-review-2.output.verdict'
       RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/plan/attempt-2"
-      printf '%s\n' '$plan-review-2.output' > "$RUN_DIR/plan/attempt-2/review.json"
+      printf '%s\n' $plan-review-2.output > "$RUN_DIR/plan/attempt-2/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 2 <<'PY'
       import json, sys, os
       path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -828,7 +832,7 @@ nodes:
       VERDICT='$plan-review-3.output.verdict'
       RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/plan/attempt-3"
-      printf '%s\n' '$plan-review-3.output' > "$RUN_DIR/plan/attempt-3/review.json"
+      printf '%s\n' $plan-review-3.output > "$RUN_DIR/plan/attempt-3/review.json"
       python3 - "$RUN_DIR/state/pipeline.json" "$VERDICT" 3 <<'PY'
       import json, sys, os
       path, verdict, attempt = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -897,12 +901,12 @@ nodes:
       elif command -v bun >/dev/null && grep -q '"validate"' package.json 2>/dev/null; then
         CMD="bun run validate"
       else
-        echo "QUALITY_INFRASTRUCTURE_MISSING" | tee "$LOG"
+        echo "QUALITY_INFRASTRUCTURE_MISSING" > "$LOG"
         echo "QUALITY_INFRASTRUCTURE_MISSING"; exit 0
       fi
 
-      echo "+ $CMD" | tee "$LOG"
-      if $CMD 2>&1 | tee -a "$LOG"; then echo "QUALITY_PASS"
+      echo "+ $CMD" > "$LOG"
+      if $CMD >> "$LOG" 2>&1; then echo "QUALITY_PASS"
       else echo "QUALITY_FAIL"
       fi
     timeout: 600000
@@ -930,6 +934,11 @@ nodes:
     trigger_rule: none_failed_min_one_success
     bash: |
       set -euo pipefail
+      if [ -n "$(git status --porcelain)" ]; then
+        echo "FATAL: working tree is dirty — implementation must commit all changes before code review" >&2
+        git status --short >&2
+        exit 1
+      fi
       git rev-parse HEAD > "$ARTIFACTS_DIR/codex-pre-sha-cr.txt"
       git status --porcelain > "$ARTIFACTS_DIR/codex-pre-status-cr.txt"
       RUN_DIR=$init.output
@@ -969,7 +978,7 @@ nodes:
         || { echo "FATAL: Codex modified working tree during code review" >&2; exit 1; }
       RUN_DIR=$init.output
       mkdir -p "$RUN_DIR/code/attempt-1"
-      printf '%s\n' '$code-review-1.output' > "$RUN_DIR/code/attempt-1/review.json"
+      printf '%s\n' $code-review-1.output > "$RUN_DIR/code/attempt-1/review.json"
       echo ok
 
   - id: code-review-fix-loop
