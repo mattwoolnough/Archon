@@ -114,7 +114,12 @@ export function registerBuiltinProviders(): void {
       capabilities: CLAUDE_CAPABILITIES,
       isModelCompatible: (model: string): boolean => {
         const aliases = ['sonnet', 'opus', 'haiku'];
-        return aliases.includes(model) || model.startsWith('claude-') || model === 'inherit';
+        // Match bare alias ('opus') and context-window variants ('opus[1m]', 'sonnet[200k]', etc.)
+        return (
+          aliases.some(a => model === a || model.startsWith(a + '[')) ||
+          model.startsWith('claude-') ||
+          model === 'inherit'
+        );
       },
       builtIn: true,
     },
@@ -126,7 +131,9 @@ export function registerBuiltinProviders(): void {
       isModelCompatible: (model: string): boolean => {
         const claudeAliases = ['sonnet', 'opus', 'haiku'];
         return (
-          !claudeAliases.includes(model) && !model.startsWith('claude-') && model !== 'inherit'
+          !claudeAliases.some(a => model === a || model.startsWith(a + '[')) &&
+          !model.startsWith('claude-') &&
+          model !== 'inherit'
         );
       },
       builtIn: true,

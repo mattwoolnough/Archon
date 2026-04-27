@@ -26,6 +26,14 @@ const realArchonPaths = await import('@archon/paths');
 mock.module('@archon/paths', () => ({
   ...realArchonPaths,
   createLogger: mock(() => mockLogger),
+  // Isolate tests from real ~/.archon/workflows/ so installed global workflows
+  // don't pollute discovery counts. Respect ARCHON_HOME when tests set it
+  // explicitly (home-scoped workflow tests), otherwise use a nonexistent path.
+  getArchonHome: () => process.env.ARCHON_HOME ?? '/nonexistent/test-home',
+  getHomeWorkflowsPath: () =>
+    join(process.env.ARCHON_HOME ?? '/nonexistent/test-home', 'workflows'),
+  getLegacyHomeWorkflowsPath: () =>
+    join(process.env.ARCHON_HOME ?? '/nonexistent/test-home', '.archon', 'workflows'),
 }));
 
 // Bootstrap provider registry (needed by isModelCompatible in dag-node schema)
